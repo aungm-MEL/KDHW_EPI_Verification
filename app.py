@@ -17,6 +17,7 @@ PW_CODE_HEADER = "mother_code"
 VERIFICATION_SHEET = "children_verification"
 LONG_FORM_SHEET = "children_long_form"
 PW_VERIFICATION_SHEET = "pw_verification"
+PW_LONG_FORM_SHEET = "pw_long"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -135,7 +136,6 @@ LONG_FORM_DOSES = [
     "Penta1",
     "Penta2",
     "Penta3",
-    "Penta4",
     "MMR1",
     "MMR2",
     "JE1",
@@ -169,6 +169,15 @@ PW_SOURCE_FIELD_RULES = [
     ("td_first_dose", "td_first_dose_other", "Td1_source"),
     ("td_second_dose", "td_second_dose_other", "Td2_source"),
 ]
+PW_DOSE_DATE_HEADERS = {
+    "Td1": "td_first_dose",
+    "Td2": "td_second_dose",
+}
+PW_DOSE_REPORTING_HEADERS = {
+    "Td1": "td_first_dose_reporting_month",
+    "Td2": "td_second_dose_reporting_month",
+}
+PW_LONG_DOSES = ["Td1", "Td2"]
 
 
 def normalize_code(value: object) -> str:
@@ -342,6 +351,7 @@ def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
     duplicate_codes = {code for code, count in code_counts.items() if count > 1}
 
     report = output.create_sheet(title=PW_VERIFICATION_SHEET)
+    pw_long = output.create_sheet(title=PW_LONG_FORM_SHEET)
 
     present_source_rules = [rule for rule in PW_SOURCE_FIELD_RULES if rule[0] in headers and rule[1] in headers]
     other_to_source = {other_header: source_header for _, other_header, source_header in present_source_rules}
@@ -362,6 +372,17 @@ def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
             output_headers.append(header if isinstance(header, str) else "")
 
     report.append(output_headers + ["verification_status"])
+
+    if "IDP" not in headers:
+        raise KeyError("Column 'IDP' was not found in sheet 'PW'.")
+    idp_column = headers.index("IDP") + 1
+    static_columns = list(range(1, idp_column + 1))
+    pw_long_headers = [headers[index - 1] for index in static_columns] + [
+        "vaccine_dose",
+        "reporting_month",
+        "source",
+    ]
+    pw_long.append(pw_long_headers)
 
     missing_row_count = 0
     duplicate_row_count = 0
@@ -419,6 +440,20 @@ def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
                 status = f"{status}; " + "; ".join(issues)
 
         report.append(output_row_values + [status])
+
+        static_values = [row_values[index - 1] for index in static_columns]
+        pw_source_by_dose = {
+            "Td1": td_source_values.get("TD1", "Not received yet"),
+            "Td2": td_source_values.get("TD2", "Not received yet"),
+        }
+        for dose_key in PW_LONG_DOSES:
+            source_value = pw_source_by_dose.get(dose_key, "Not received yet")
+            if source_value == "Not received yet":
+                continue
+
+            reporting_header = PW_DOSE_REPORTING_HEADERS.get(dose_key)
+            reporting_month_value = row_values[headers.index(reporting_header)] if reporting_header in headers else None
+            pw_long.append(static_values + [dose_key, reporting_month_value, source_value])
 
         if status != "OK":
             affected_row_count += 1
@@ -559,6 +594,8 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
             date_header = DOSE_DATE_HEADERS.get(dose_key)
             reporting_header = DOSE_REPORTING_HEADERS.get(dose_key)
             source_value = source_values_by_dose.get(dose_key, "Not received yet")
+            if source_value == "Not received yet":
+                continue
 
             dose_date_value = dose_date_values.get(dose_key)
             reporting_month_value = row_values[headers.index(reporting_header)] if reporting_header in headers else None
@@ -668,6 +705,7 @@ def main() -> None:
     st.write("Unlogical sequences are checked for OPV, Penta, and MMR: earlier dose missing while later dose received, or later dose date earlier than primary dose date.")
     st.write("PW sheet drops Td third/fourth/fifth groups, prevent_td_newborn, and comments; checks duplicate mother_code; replaces td_first_dose_other and td_second_dose_other with Td1_source and Td2_source.")
     st.write("PW unlogical checks: Td1 not received while Td2 received, and Td2 date earlier than Td1 date. Rows are flagged and mother_code is highlighted red.")
+    st.write("Long-form sheets include only received doses; rows with source 'Not received yet' are excluded in children_long_form and pw_long.")
 
 
 if __name__ == "__main__":
