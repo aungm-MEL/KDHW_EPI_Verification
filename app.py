@@ -11,9 +11,12 @@ from openpyxl.styles import Font, PatternFill
 
 APP_TITLE = "KDHW Children Verification"
 SOURCE_SHEET = "children"
+PW_SHEET = "PW"
 CODE_HEADER = "children_code"
+PW_CODE_HEADER = "mother_code"
 VERIFICATION_SHEET = "children_verification"
 LONG_FORM_SHEET = "children_long_form"
+PW_VERIFICATION_SHEET = "pw_verification"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -149,6 +152,23 @@ SEQUENCE_RULES = {
     "Penta": ["Penta1", "Penta2", "Penta3"],
     "MMR": ["MMR1", "MMR2"],
 }
+PW_DROP_HEADERS = {
+    "td_third_dose",
+    "td_third_dose_other",
+    "td_third_dose_reporting_month",
+    "td_fourth_dose",
+    "td_fourth_dose_other",
+    "td_fourth_dose_reporting_month",
+    "td_fifth_dose",
+    "td_fifth_dose_other",
+    "td_fifth_dose_reporting_month",
+    "prevent_td_newborn",
+    "comments",
+}
+PW_SOURCE_FIELD_RULES = [
+    ("td_first_dose", "td_first_dose_other", "Td1_source"),
+    ("td_second_dose", "td_second_dose_other", "Td2_source"),
+]
 
 
 def normalize_code(value: object) -> str:
@@ -299,6 +319,117 @@ def get_children_sheet(workbook: Workbook):
         available = ", ".join(workbook.sheetnames)
         raise KeyError(f"Sheet '{SOURCE_SHEET}' was not found. Available sheets: {available}")
     return workbook[SOURCE_SHEET]
+
+
+def get_pw_sheet(workbook: Workbook):
+    if PW_SHEET not in workbook.sheetnames:
+        available = ", ".join(workbook.sheetnames)
+        raise KeyError(f"Sheet '{PW_SHEET}' was not found. Available sheets: {available}")
+    return workbook[PW_SHEET]
+
+
+def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
+    headers = [pw_sheet.cell(1, column).value for column in range(1, pw_sheet.max_column + 1)]
+    if PW_CODE_HEADER not in headers:
+        raise KeyError(f"Column '{PW_CODE_HEADER}' was not found in sheet '{PW_SHEET}'.")
+
+    mother_code_column = headers.index(PW_CODE_HEADER) + 1
+    rows = list(pw_sheet.iter_rows(min_row=2, values_only=True))
+
+    normalized_codes = [normalize_code(row[mother_code_column - 1]) for row in rows]
+    non_empty_codes = [code for code in normalized_codes if code]
+    code_counts = Counter(non_empty_codes)
+    duplicate_codes = {code for code, count in code_counts.items() if count > 1}
+
+    report = output.create_sheet(title=PW_VERIFICATION_SHEET)
+
+    present_source_rules = [rule for rule in PW_SOURCE_FIELD_RULES if rule[0] in headers and rule[1] in headers]
+    other_to_source = {other_header: source_header for _, other_header, source_header in present_source_rules}
+
+    included_columns: list[int] = []
+    output_headers: list[str] = []
+    report_column_map: dict[int, int] = {}
+
+    for source_index, header in enumerate(headers, start=1):
+        if isinstance(header, str) and header in PW_DROP_HEADERS:
+            continue
+
+        included_columns.append(source_index)
+        report_column_map[source_index] = len(output_headers) + 1
+        if isinstance(header, str) and header in other_to_source:
+            output_headers.append(other_to_source[header])
+        else:
+            output_headers.append(header if isinstance(header, str) else "")
+
+    report.append(output_headers + ["verification_status"])
+
+    duplicate_row_count = 0
+    unlogical_row_count = 0
+    affected_row_count = 0
+
+    rule_by_other_header = {rule[1]: rule for rule in present_source_rules}
+
+    for row_index, row in enumerate(rows, start=2):
+        row_values = list(row)
+        mother_code = normalize_code(row_values[mother_code_column - 1])
+        status = "OK"
+        issues: list[str] = []
+
+        if mother_code and mother_code in duplicate_codes:
+            status = "Duplicate mother_code"
+            duplicate_row_count += 1
+
+        output_row_values: list[object] = []
+        td_source_values: dict[str, str] = {}
+
+        for source_index in included_columns:
+            header = headers[source_index - 1]
+            if isinstance(header, str) and header in rule_by_other_header:
+                date_header, other_header, source_header = rule_by_other_header[header]
+                date_value = row_values[headers.index(date_header)]
+                other_value = row_values[headers.index(other_header)]
+                source_value = build_source_value(date_value, other_value)
+                output_row_values.append(source_value)
+                if source_header == "Td1_source":
+                    td_source_values["TD1"] = source_value
+                elif source_header == "Td2_source":
+                    td_source_values["TD2"] = source_value
+            else:
+                output_row_values.append(row_values[source_index - 1])
+
+        td1_date = normalize_date(row_values[headers.index("td_first_dose")]) if "td_first_dose" in headers else None
+        td2_date = normalize_date(row_values[headers.index("td_second_dose")]) if "td_second_dose" in headers else None
+        td1_received = has_received(td_source_values.get("TD1"))
+        td2_received = has_received(td_source_values.get("TD2"))
+
+        if not td1_received and td2_received:
+            issues.append("Td1 not received but Td2 received")
+        if td1_date is not None and td2_date is not None and td2_date < td1_date:
+            issues.append("Td2 date earlier than Td1 date")
+
+        if issues:
+            unlogical_row_count += 1
+            if status == "OK":
+                status = "; ".join(issues)
+            else:
+                status = f"{status}; " + "; ".join(issues)
+
+        report.append(output_row_values + [status])
+
+        if status != "OK":
+            affected_row_count += 1
+            code_cell = report.cell(row=row_index, column=report_column_map[mother_code_column])
+            code_cell.fill = RED_FILL
+            code_cell.font = RED_FONT
+
+    summary = {
+        "rows": len(rows),
+        "duplicate_rows": duplicate_row_count,
+        "duplicate_codes": len(duplicate_codes),
+        "unlogical_rows": unlogical_row_count,
+        "affected_rows": affected_row_count,
+    }
+    return summary
 
 
 def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
@@ -486,7 +617,9 @@ def main() -> None:
     try:
         source_workbook, source_path = load_source_workbook(uploaded_file)
         source_sheet = get_children_sheet(source_workbook)
+        pw_sheet = get_pw_sheet(source_workbook)
         report_workbook, summary = build_verification_report(source_sheet)
+        pw_summary = build_pw_verification_sheet(report_workbook, pw_sheet)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -506,11 +639,19 @@ def main() -> None:
     if summary["unlogical_rows"] > 0:
         st.warning("Unlogical dose records detected for OPV, Penta, or MMR sequences. Check highlighted children_code rows.")
 
+    st.subheader("PW sheet checks")
+    pw_col1, pw_col2, pw_col3, pw_col4 = st.columns(4)
+    pw_col1.metric("PW rows checked", pw_summary["rows"])
+    pw_col2.metric("Duplicate mother_code rows", pw_summary["duplicate_rows"])
+    pw_col3.metric("Duplicate mother_code values", pw_summary["duplicate_codes"])
+    pw_col4.metric("PW rows with unlogical Td records", pw_summary["unlogical_rows"])
+    st.info(f"PW rows with issues: {pw_summary['affected_rows']}")
+
     report_bytes = workbook_to_bytes(report_workbook)
     st.download_button(
         label="Download new verification file",
         data=report_bytes,
-        file_name="KDHW_children_verification.xlsx",
+        file_name="KDHW_verification.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -519,6 +660,8 @@ def main() -> None:
     st.write("Duplicate children_code values are flagged red on every matching row.")
     st.write("date_of_birth is checked against registered_date and the listed vaccine date columns; later values are flagged red.")
     st.write("Unlogical sequences are checked for OPV, Penta, and MMR: earlier dose missing while later dose received, or later dose date earlier than primary dose date.")
+    st.write("PW sheet drops Td third/fourth/fifth groups, prevent_td_newborn, and comments; checks duplicate mother_code; replaces td_first_dose_other and td_second_dose_other with Td1_source and Td2_source.")
+    st.write("PW unlogical checks: Td1 not received while Td2 received, and Td2 date earlier than Td1 date. Rows are flagged and mother_code is highlighted red.")
 
 
 if __name__ == "__main__":
