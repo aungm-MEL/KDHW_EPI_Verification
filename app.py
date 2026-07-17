@@ -423,7 +423,7 @@ def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
         reporting_month = normalize_date(child_ws.cell(r, child_idx["reporting_month"]).value)
         vaccine_dose = normalize_code(child_ws.cell(r, child_idx["vaccine_dose"]).value)
         source_value = normalize_code(child_ws.cell(r, child_idx["source"]).value)
-        if not children_code or reporting_month is None or source_value == "Not received yet":
+        if not children_code or reporting_month is None or source_value != "KDHW":
             continue
 
         period = period_from_date(reporting_month)
@@ -474,7 +474,7 @@ def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
         reporting_month = normalize_date(pw_ws.cell(r, pw_idx["reporting_month"]).value)
         vaccine_dose = normalize_code(pw_ws.cell(r, pw_idx["vaccine_dose"]).value)
         source_value = normalize_code(pw_ws.cell(r, pw_idx["source"]).value)
-        if not mother_code or reporting_month is None or source_value == "Not received yet":
+        if not mother_code or reporting_month is None or source_value != "KDHW":
             continue
 
         period = period_from_date(reporting_month)
