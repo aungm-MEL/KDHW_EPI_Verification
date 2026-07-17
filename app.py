@@ -401,7 +401,66 @@ def init_disaggregate_bucket() -> dict[str, set[str]]:
     return {column: set() for column in DISAGGREGATE_COUNT_COLUMNS}
 
 
-def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
+def parse_year_value(value: object):
+    text = normalize_code(value)
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def build_project_lookup(source_workbook: Workbook) -> dict[tuple[int, str], str]:
+    reference_sheet_name = None
+    for name in source_workbook.sheetnames:
+        if normalize_code(name).casefold() == "reference":
+            reference_sheet_name = name
+            break
+    if reference_sheet_name is None:
+        for name in source_workbook.sheetnames:
+            if "reference" in normalize_code(name).casefold():
+                reference_sheet_name = name
+                break
+    if reference_sheet_name is None:
+        return {}
+
+    ws = source_workbook[reference_sheet_name]
+    headers = [normalize_code(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+
+    year_candidates = {"year", "reporting_year", "yr"}
+    clinic_candidates = {"clinic", "clinic name", "clinic_name", "vthc", "vthc_name"}
+    project_candidates = {"project", "project name", "project_name"}
+
+    year_col = next((i + 1 for i, h in enumerate(headers) if h.casefold() in year_candidates), None)
+    clinic_col = next((i + 1 for i, h in enumerate(headers) if h.casefold() in clinic_candidates), None)
+    project_col = next((i + 1 for i, h in enumerate(headers) if h.casefold() in project_candidates), None)
+    if year_col is None or clinic_col is None or project_col is None:
+        return {}
+
+    lookup: dict[tuple[int, str], str] = {}
+    for r in range(2, ws.max_row + 1):
+        year_value = parse_year_value(ws.cell(r, year_col).value)
+        clinic_value = normalize_code(ws.cell(r, clinic_col).value)
+        project_value = normalize_code(ws.cell(r, project_col).value)
+        if year_value is None or not clinic_value or not project_value:
+            continue
+        lookup[(year_value, clinic_value.casefold())] = project_value
+
+    return lookup
+
+
+def project_name_for_row(year: int, clinic: str, lookup: dict[tuple[int, str], str]) -> str:
+    if year == 2023:
+        return "RISE"
+    if year == 2024:
+        return "REACH-KK"
+    if year in {2025, 2026}:
+        return lookup.get((year, normalize_code(clinic).casefold()), "")
+    return ""
+
+
+def build_vthc_dose_disaggregate_sheet(output: Workbook, source_workbook: Workbook) -> None:
     if LONG_FORM_SHEET not in output.sheetnames or PW_LONG_FORM_SHEET not in output.sheetnames:
         return
 
@@ -416,6 +475,7 @@ def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
     pw_headers = [pw_ws.cell(1, c).value for c in range(1, pw_ws.max_column + 1)]
     pw_idx = {name: pw_headers.index(name) + 1 for name in pw_headers if isinstance(name, str)}
 
+    project_lookup = build_project_lookup(source_workbook)
     aggregate: dict[tuple[int, str, str, str, str, str, str, str], dict[str, set[str]]] = {}
 
     for r in range(2, child_ws.max_row + 1):
@@ -433,7 +493,8 @@ def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
         twp_mimu = normalize_code(child_ws.cell(r, child_idx["township_name_MIMU"]).value)
         clinic = normalize_code(child_ws.cell(r, child_idx["vthc_name"]).value)
 
-        key = (year, period, "KDHW", "", district, township_eho, twp_mimu, clinic)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        key = (year, period, "KDHW", project_name, district, township_eho, twp_mimu, clinic)
         bucket = aggregate.setdefault(key, init_disaggregate_bucket())
 
         age_months = normalize_age_months(child_ws.cell(r, child_idx["ageInMonths"]).value)
@@ -462,7 +523,8 @@ def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
         if completed_info:
             completed_group, completed_period = completed_info
             completed_year = int(completed_period.split("_")[1])
-            completed_key = (completed_year, completed_period, "KDHW", "", district, township_eho, twp_mimu, clinic)
+            completed_project_name = project_name_for_row(completed_year, clinic, project_lookup)
+            completed_key = (completed_year, completed_period, "KDHW", completed_project_name, district, township_eho, twp_mimu, clinic)
             completed_bucket = aggregate.setdefault(completed_key, init_disaggregate_bucket())
             if completed_group == "U1":
                 completed_bucket["CD_U1"].add(children_code)
@@ -484,7 +546,8 @@ def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
         twp_mimu = normalize_code(pw_ws.cell(r, pw_idx["township_name_MIMU"]).value)
         clinic = normalize_code(pw_ws.cell(r, pw_idx["vthc_name"]).value)
 
-        key = (year, period, "KDHW", "", district, township_eho, twp_mimu, clinic)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        key = (year, period, "KDHW", project_name, district, township_eho, twp_mimu, clinic)
         bucket = aggregate.setdefault(key, init_disaggregate_bucket())
         if vaccine_dose == "Td1":
             bucket["Td1"].add(mother_code)
@@ -889,7 +952,7 @@ def main() -> None:
         pw_sheet = get_pw_sheet(source_workbook)
         report_workbook, summary = build_verification_report(source_sheet)
         pw_summary = build_pw_verification_sheet(report_workbook, pw_sheet)
-        build_vthc_dose_disaggregate_sheet(report_workbook)
+        build_vthc_dose_disaggregate_sheet(report_workbook, source_workbook)
     except Exception as exc:
         st.error(str(exc))
         return
