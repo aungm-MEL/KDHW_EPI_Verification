@@ -72,6 +72,31 @@ DATE_COLUMNS = [
     "Rota_first_time_dose",
     "Rota_second_time_dose",
 ]
+DOSE_DATE_HEADERS = {
+    "BCG": "BCG",
+    "OPV1": "OPV_first_time_dose",
+    "OPV2": "OPV_second_time_dose",
+    "OPV3": "OPV_third_time_dose",
+    "Penta1": "Penta_first_time_dose",
+    "Penta2": "Penta_second_time_dose",
+    "Penta3": "Penta_third_time_dose",
+    "MMR1": "MMR_first_time_dose",
+    "MMR2": "MMR_second_time_dose",
+}
+DOSE_SOURCE_HEADERS = {
+    "BCG": "BCG_source",
+    "OPV1": "OPV1_source",
+    "OPV2": "OPV2_source",
+    "OPV3": "OPV3_source",
+    "Penta1": "Penta1_source",
+    "Penta2": "Penta2_source",
+    "Penta3": "Penta3_source",
+    "MMR1": "MMR1_source",
+    "MMR2": "MMR2_source",
+}
+U1_REQUIRED_DOSES = ["BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1"]
+ONE_TO_FIVE_REQUIRED_DOSES = ["OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1"]
+COMPLETION_CHECK_DOSES = ["BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1", "MMR2"]
 
 
 def normalize_code(value: object) -> str:
@@ -86,6 +111,53 @@ def normalize_date(value: object):
     if isinstance(value, date):
         return value
     return None
+
+
+def normalize_age_months(value: object):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = normalize_code(value)
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def quarter_label(value: date) -> str:
+    quarter = ((value.month - 1) // 3) + 1
+    return f"Q{quarter} {value.year}"
+
+
+def calculate_completed_dose(age_months, source_values: dict[str, str], date_values: dict[str, date | None]) -> str:
+    if age_months is None:
+        return "not complete yet"
+
+    if 0 <= age_months <= 11:
+        group_label = "U1"
+        required_doses = U1_REQUIRED_DOSES
+    elif 12 <= age_months <= 59:
+        group_label = "1-5"
+        required_doses = ONE_TO_FIVE_REQUIRED_DOSES
+    else:
+        return "not complete yet"
+
+    if any(source_values.get(dose, "Not received yet") == "Not received yet" for dose in required_doses):
+        return "not complete yet"
+
+    kdhw_dates = [
+        date_values.get(dose)
+        for dose in COMPLETION_CHECK_DOSES
+        if source_values.get(dose) == "KDHW" and date_values.get(dose) is not None
+    ]
+    if not kdhw_dates:
+        return "not complete yet"
+
+    last_kdhw_date = max(kdhw_dates)
+    return f"{group_label} completed in {quarter_label(last_kdhw_date)}"
 
 
 def build_source_value(date_value: object, other_value: object) -> str:
@@ -160,7 +232,7 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
 
     included_columns, report_headers, report_column_map = build_output_columns(headers)
     present_source_rules = [rule for rule in SOURCE_FIELD_RULES if rule[0] in headers and rule[1] in headers]
-    report_headers = report_headers + ["verification_status"]
+    report_headers = report_headers + ["completed_dose", "verification_status"]
     report.append(report_headers)
 
     missing_count = 0
@@ -200,17 +272,31 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
                 status = f"{status}; " + "; ".join(issues)
 
         output_row_values: list[object] = []
+        source_values_by_dose: dict[str, str] = {}
         for index in included_columns:
             header = headers[index - 1]
             if isinstance(header, str) and header in {other_header for _, other_header, _ in present_source_rules}:
                 date_header, other_header, _source_header = next(rule for rule in present_source_rules if rule[1] == header)
                 date_value = row_values[headers.index(date_header)]
                 other_value = row_values[headers.index(other_header)]
-                output_row_values.append(build_source_value(date_value, other_value))
+                source_value = build_source_value(date_value, other_value)
+                output_row_values.append(source_value)
+                for dose_key, source_header in DOSE_SOURCE_HEADERS.items():
+                    if source_header == _source_header:
+                        source_values_by_dose[dose_key] = source_value
+                        break
             else:
                 output_row_values.append(row_values[index - 1])
 
-        report.append(output_row_values + [status])
+        dose_date_values = {
+            dose_key: normalize_date(row_values[headers.index(date_header)])
+            for dose_key, date_header in DOSE_DATE_HEADERS.items()
+            if date_header in headers
+        }
+        age_months = normalize_age_months(row_values[headers.index("ageInMonths")]) if "ageInMonths" in headers else None
+        completed_dose_value = calculate_completed_dose(age_months, source_values_by_dose, dose_date_values)
+
+        report.append(output_row_values + [completed_dose_value, status])
 
         if status != "OK":
             code_cell = report.cell(row=row_index, column=report_column_map[code_column])
