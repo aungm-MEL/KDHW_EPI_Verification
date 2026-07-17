@@ -144,6 +144,11 @@ LONG_FORM_DOSES = [
 U1_REQUIRED_DOSES = ["BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1"]
 ONE_TO_FIVE_REQUIRED_DOSES = ["OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1"]
 COMPLETION_CHECK_DOSES = ["BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1", "MMR2"]
+SEQUENCE_RULES = {
+    "OPV": ["OPV1", "OPV2", "OPV3"],
+    "Penta": ["Penta1", "Penta2", "Penta3"],
+    "MMR": ["MMR1", "MMR2"],
+}
 
 
 def normalize_code(value: object) -> str:
@@ -205,6 +210,34 @@ def calculate_completed_dose(age_months, source_values: dict[str, str], date_val
 
     last_kdhw_date = max(kdhw_dates)
     return f"{group_label} completed in {quarter_label(last_kdhw_date)}"
+
+
+def has_received(source_value: str | None) -> bool:
+    return normalize_code(source_value) not in {"", "Not received yet"}
+
+
+def find_unlogical_sequence_issues(source_values: dict[str, str], date_values: dict[str, date | None]) -> list[str]:
+    issues: list[str] = []
+
+    for group_name, doses in SEQUENCE_RULES.items():
+        received_flags = [has_received(source_values.get(dose)) for dose in doses]
+
+        for idx, dose in enumerate(doses[:-1]):
+            if not received_flags[idx] and any(received_flags[idx + 1 :]):
+                later_doses = ", ".join(doses[idx + 1 :])
+                issues.append(f"{dose} not received but later dose(s) received ({later_doses})")
+
+        for earlier_idx, earlier_dose in enumerate(doses[:-1]):
+            earlier_date = date_values.get(earlier_dose)
+            if earlier_date is None:
+                continue
+
+            for later_dose in doses[earlier_idx + 1 :]:
+                later_date = date_values.get(later_dose)
+                if later_date is not None and later_date < earlier_date:
+                    issues.append(f"{later_dose} date earlier than {earlier_dose} date")
+
+    return issues
 
 
 def datediff_months(start_date: date | None, end_date: date | None):
@@ -314,13 +347,15 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
     missing_count = 0
     duplicate_row_count = 0
     dob_order_row_count = 0
+    unlogical_row_count = 0
+    affected_row_count = 0
 
     for row_index, row in enumerate(rows, start=2):
         row_values = list(row)
         code_value = normalize_code(row_values[code_column - 1])
         dob_value = normalize_date(row_values[dob_column - 1])
         status = "OK"
-        issues: list[str] = []
+        dob_issues: list[str] = []
 
         if not code_value:
             status = "Missing children_code"
@@ -332,20 +367,13 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
         if dob_value is not None and registered_column is not None:
             registered_value = normalize_date(row_values[registered_column - 1])
             if registered_value is not None and dob_value > registered_value:
-                issues.append("date_of_birth later than registered_date")
+                dob_issues.append("date_of_birth later than registered_date")
 
         if dob_value is not None:
             for column in comparison_columns:
                 compared_value = normalize_date(row_values[column - 1])
                 if compared_value is not None and dob_value > compared_value:
-                    issues.append(f"date_of_birth later than {headers[column - 1]}")
-
-        if issues:
-            dob_order_row_count += 1
-            if status == "OK":
-                status = "; ".join(issues)
-            else:
-                status = f"{status}; " + "; ".join(issues)
+                    dob_issues.append(f"date_of_birth later than {headers[column - 1]}")
 
         output_row_values: list[object] = []
         source_values_by_dose: dict[str, str] = {}
@@ -368,10 +396,26 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
             for dose_key, date_header in DOSE_DATE_HEADERS.items()
             if date_header in headers
         }
+        unlogical_issues = find_unlogical_sequence_issues(source_values_by_dose, dose_date_values)
+
+        if dob_issues:
+            dob_order_row_count += 1
+        if unlogical_issues:
+            unlogical_row_count += 1
+
+        combined_issues = dob_issues + unlogical_issues
+        if combined_issues:
+            if status == "OK":
+                status = "; ".join(combined_issues)
+            else:
+                status = f"{status}; " + "; ".join(combined_issues)
+
         age_months = normalize_age_months(row_values[headers.index("ageInMonths")]) if "ageInMonths" in headers else None
         completed_dose_value = calculate_completed_dose(age_months, source_values_by_dose, dose_date_values)
 
         report.append(output_row_values + [completed_dose_value, status])
+        if status != "OK":
+            affected_row_count += 1
 
         static_values = [row_values[index - 1] for index in static_columns]
         dob_for_age = normalize_date(row_values[dob_column - 1])
@@ -401,19 +445,19 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
             code_cell.font = RED_FONT
 
             dob_cell = report.cell(row=row_index, column=report_column_map[dob_column])
-            if issues:
+            if dob_issues:
                 dob_cell.fill = RED_FILL
                 dob_cell.font = RED_FONT
 
     duplicate_code_count = len(duplicate_codes)
-    affected_rows = missing_count + duplicate_row_count
     summary = {
         "rows": len(rows),
         "missing_rows": missing_count,
         "duplicate_rows": duplicate_row_count,
         "duplicate_codes": duplicate_code_count,
         "dob_order_rows": dob_order_row_count,
-        "affected_rows": affected_rows,
+        "unlogical_rows": unlogical_row_count,
+        "affected_rows": affected_row_count,
     }
     return output, summary
 
@@ -456,8 +500,11 @@ def main() -> None:
     col4.metric("Duplicate codes", summary["duplicate_codes"])
 
     st.metric("Rows with date order issues", summary["dob_order_rows"])
+    st.metric("Rows with unlogical dose records", summary["unlogical_rows"])
 
     st.info(f"Rows with issues: {summary['affected_rows']}")
+    if summary["unlogical_rows"] > 0:
+        st.warning("Unlogical dose records detected for OPV, Penta, or MMR sequences. Check highlighted children_code rows.")
 
     report_bytes = workbook_to_bytes(report_workbook)
     st.download_button(
@@ -471,6 +518,7 @@ def main() -> None:
     st.write("Missing children_code values are flagged red.")
     st.write("Duplicate children_code values are flagged red on every matching row.")
     st.write("date_of_birth is checked against registered_date and the listed vaccine date columns; later values are flagged red.")
+    st.write("Unlogical sequences are checked for OPV, Penta, and MMR: earlier dose missing while later dose received, or later dose date earlier than primary dose date.")
 
 
 if __name__ == "__main__":
