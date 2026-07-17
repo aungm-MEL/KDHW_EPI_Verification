@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from io import BytesIO
 from datetime import date, datetime
+import re
 
 import streamlit as st
 from openpyxl import Workbook, load_workbook
@@ -18,6 +19,7 @@ VERIFICATION_SHEET = "children_verification"
 LONG_FORM_SHEET = "children_long_form"
 PW_VERIFICATION_SHEET = "pw_verification"
 PW_LONG_FORM_SHEET = "pw_long"
+VTHC_DISAGGREGATE_SHEET = "VTHC_dose_disaggregate"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -178,6 +180,59 @@ PW_DOSE_REPORTING_HEADERS = {
     "Td2": "td_second_dose_reporting_month",
 }
 PW_LONG_DOSES = ["Td1", "Td2"]
+DISAGGREGATE_HEADERS = [
+    "Year",
+    "period",
+    "Organization",
+    "Project Name",
+    "District (EHO)",
+    "Township_EHO",
+    "Twp_MIMU",
+    "Clinic Name",
+    "ALOD-U1",
+    "ALOD-U5",
+    "ALOD->5",
+    "BCG_U1",
+    "BCG_U5",
+    "BCG_>5",
+    "OPV1_U1",
+    "OPV1_U5",
+    "OPV1_>5",
+    "OPV2_U1",
+    "OPV2_U5",
+    "OPV2_>5",
+    "OPV3_U1",
+    "OPV3_U5",
+    "OPV3_>5",
+    "Penta1_U1",
+    "Penta1_U5",
+    "Penta1_>5",
+    "Penta2_U1",
+    "Penta2_U5",
+    "Penta2_>5",
+    "Penta3_U1",
+    "Penta3_U5",
+    "Penta3_>5",
+    "MMR1_U1",
+    "MMR1_U5",
+    "MMR1_>5",
+    "MMR2_U1",
+    "MMR2_U5",
+    "MMR2_>5",
+    "JE_U1",
+    "JE_U5",
+    "JE_>5",
+    "IPV_U1",
+    "IPV_U5",
+    "IPV_>5",
+    "CD_U1",
+    "CD_U5",
+    "CD_>5",
+    "Td1",
+    "Td2",
+    "Td At least one dose",
+]
+DISAGGREGATE_COUNT_COLUMNS = DISAGGREGATE_HEADERS[8:]
 
 
 def normalize_code(value: object) -> str:
@@ -287,6 +342,178 @@ def build_source_value(date_value: object, other_value: object) -> str:
     if normalize_date(date_value) is not None:
         return "KDHW"
     return "Not received yet"
+
+
+def period_from_date(value: date) -> str:
+    quarter = ((value.month - 1) // 3) + 1
+    return f"Q{quarter}_{value.year}"
+
+
+def parse_completed_period(value: str) -> tuple[str, str] | None:
+    match = re.match(r"^(U1|1-5)\s+completed\s+in\s+Q([1-4])[ _](\d{4})$", normalize_code(value))
+    if not match:
+        return None
+    group = match.group(1)
+    period = f"Q{match.group(2)}_{match.group(3)}"
+    return group, period
+
+
+def age_bucket(age_months: int | None):
+    if age_months is None:
+        return None
+    if 0 <= age_months <= 11:
+        return "U1"
+    if 12 <= age_months <= 59:
+        return "U5"
+    if age_months >= 60:
+        return ">5"
+    return None
+
+
+def dose_u1_eligible(dose_key: str, age_at_dose: int | None) -> bool:
+    if age_at_dose is None:
+        return False
+    if not (0 <= age_at_dose <= 11):
+        return False
+
+    if dose_key in {"OPV1", "Penta1"}:
+        return age_at_dose >= 2
+    if dose_key in {"OPV2", "Penta2"}:
+        return age_at_dose >= 3
+    if dose_key in {"OPV3", "Penta3"}:
+        return age_at_dose >= 4
+    if dose_key == "MMR1":
+        return age_at_dose >= 9
+    if dose_key == "MMR2":
+        return age_at_dose >= 10
+    return True
+
+
+def dose_group_key(vaccine_dose: str) -> str | None:
+    if vaccine_dose in {"BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1", "MMR2", "IPV"}:
+        return vaccine_dose
+    if vaccine_dose in {"JE1", "JE2"}:
+        return "JE"
+    return None
+
+
+def init_disaggregate_bucket() -> dict[str, set[str]]:
+    return {column: set() for column in DISAGGREGATE_COUNT_COLUMNS}
+
+
+def build_vthc_dose_disaggregate_sheet(output: Workbook) -> None:
+    if LONG_FORM_SHEET not in output.sheetnames or PW_LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    child_ws = output[LONG_FORM_SHEET]
+    pw_ws = output[PW_LONG_FORM_SHEET]
+    report = output.create_sheet(title=VTHC_DISAGGREGATE_SHEET)
+    report.append(DISAGGREGATE_HEADERS)
+
+    child_headers = [child_ws.cell(1, c).value for c in range(1, child_ws.max_column + 1)]
+    child_idx = {name: child_headers.index(name) + 1 for name in child_headers if isinstance(name, str)}
+
+    pw_headers = [pw_ws.cell(1, c).value for c in range(1, pw_ws.max_column + 1)]
+    pw_idx = {name: pw_headers.index(name) + 1 for name in pw_headers if isinstance(name, str)}
+
+    aggregate: dict[tuple[int, str, str, str, str, str, str, str], dict[str, set[str]]] = {}
+
+    for r in range(2, child_ws.max_row + 1):
+        children_code = normalize_code(child_ws.cell(r, child_idx["children_code"]).value)
+        reporting_month = normalize_date(child_ws.cell(r, child_idx["reporting_month"]).value)
+        vaccine_dose = normalize_code(child_ws.cell(r, child_idx["vaccine_dose"]).value)
+        source_value = normalize_code(child_ws.cell(r, child_idx["source"]).value)
+        if not children_code or reporting_month is None or source_value == "Not received yet":
+            continue
+
+        period = period_from_date(reporting_month)
+        year = reporting_month.year
+        district = normalize_code(child_ws.cell(r, child_idx["district"]).value)
+        township_eho = normalize_code(child_ws.cell(r, child_idx["township_name"]).value)
+        twp_mimu = normalize_code(child_ws.cell(r, child_idx["township_name_MIMU"]).value)
+        clinic = normalize_code(child_ws.cell(r, child_idx["vthc_name"]).value)
+
+        key = (year, period, "KDHW", "", district, township_eho, twp_mimu, clinic)
+        bucket = aggregate.setdefault(key, init_disaggregate_bucket())
+
+        age_months = normalize_age_months(child_ws.cell(r, child_idx["ageInMonths"]).value)
+        alod = age_bucket(age_months)
+        if alod == "U1":
+            bucket["ALOD-U1"].add(children_code)
+        elif alod == "U5":
+            bucket["ALOD-U5"].add(children_code)
+        elif alod == ">5":
+            bucket["ALOD->5"].add(children_code)
+
+        dose_group = dose_group_key(vaccine_dose)
+        age_at_dose = normalize_age_months(child_ws.cell(r, child_idx["age_at_dose"]).value)
+        dose_age = age_bucket(age_at_dose)
+        if dose_group and dose_age:
+            if dose_age == "U1":
+                if dose_u1_eligible(dose_group, age_at_dose):
+                    bucket[f"{dose_group}_U1"].add(children_code)
+            elif dose_age == "U5":
+                bucket[f"{dose_group}_U5"].add(children_code)
+            elif dose_age == ">5":
+                bucket[f"{dose_group}_>5"].add(children_code)
+
+        completed_value = normalize_code(child_ws.cell(r, child_idx["completed_dose"]).value)
+        completed_info = parse_completed_period(completed_value)
+        if completed_info:
+            completed_group, completed_period = completed_info
+            completed_year = int(completed_period.split("_")[1])
+            completed_key = (completed_year, completed_period, "KDHW", "", district, township_eho, twp_mimu, clinic)
+            completed_bucket = aggregate.setdefault(completed_key, init_disaggregate_bucket())
+            if completed_group == "U1":
+                completed_bucket["CD_U1"].add(children_code)
+            elif completed_group == "1-5":
+                completed_bucket["CD_U5"].add(children_code)
+
+    for r in range(2, pw_ws.max_row + 1):
+        mother_code = normalize_code(pw_ws.cell(r, pw_idx["mother_code"]).value)
+        reporting_month = normalize_date(pw_ws.cell(r, pw_idx["reporting_month"]).value)
+        vaccine_dose = normalize_code(pw_ws.cell(r, pw_idx["vaccine_dose"]).value)
+        source_value = normalize_code(pw_ws.cell(r, pw_idx["source"]).value)
+        if not mother_code or reporting_month is None or source_value == "Not received yet":
+            continue
+
+        period = period_from_date(reporting_month)
+        year = reporting_month.year
+        district = normalize_code(pw_ws.cell(r, pw_idx["district"]).value)
+        township_eho = normalize_code(pw_ws.cell(r, pw_idx["township_name"]).value)
+        twp_mimu = normalize_code(pw_ws.cell(r, pw_idx["township_name_MIMU"]).value)
+        clinic = normalize_code(pw_ws.cell(r, pw_idx["vthc_name"]).value)
+
+        key = (year, period, "KDHW", "", district, township_eho, twp_mimu, clinic)
+        bucket = aggregate.setdefault(key, init_disaggregate_bucket())
+        if vaccine_dose == "Td1":
+            bucket["Td1"].add(mother_code)
+        if vaccine_dose == "Td2":
+            bucket["Td2"].add(mother_code)
+        if vaccine_dose in {"Td1", "Td2"}:
+            bucket["Td At least one dose"].add(mother_code)
+
+    def sort_key(value: tuple[int, str, str, str, str, str, str, str]):
+        year, period, _org, _project, district, township, twp_mimu, clinic = value
+        q_match = re.match(r"Q([1-4])_(\d{4})", period)
+        quarter = int(q_match.group(1)) if q_match else 0
+        return (year, quarter, district, township, twp_mimu, clinic)
+
+    for key in sorted(aggregate.keys(), key=sort_key):
+        year, period, org, project, district, township, twp_mimu, clinic = key
+        bucket = aggregate[key]
+        row = [
+            year,
+            period,
+            org,
+            project,
+            district,
+            township,
+            twp_mimu,
+            clinic,
+        ]
+        row.extend(len(bucket[column]) for column in DISAGGREGATE_COUNT_COLUMNS)
+        report.append(row)
 
 
 def should_exclude_output_column(header: object) -> bool:
@@ -662,6 +889,7 @@ def main() -> None:
         pw_sheet = get_pw_sheet(source_workbook)
         report_workbook, summary = build_verification_report(source_sheet)
         pw_summary = build_pw_verification_sheet(report_workbook, pw_sheet)
+        build_vthc_dose_disaggregate_sheet(report_workbook)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -706,6 +934,7 @@ def main() -> None:
     st.write("PW sheet drops Td third/fourth/fifth groups, prevent_td_newborn, and comments; checks duplicate mother_code; replaces td_first_dose_other and td_second_dose_other with Td1_source and Td2_source.")
     st.write("PW unlogical checks: Td1 not received while Td2 received, and Td2 date earlier than Td1 date. Rows are flagged and mother_code is highlighted red.")
     st.write("Long-form sheets include only received doses; rows with source 'Not received yet' are excluded in children_long_form and pw_long.")
+    st.write("VTHC_dose_disaggregate is built from children_long_form and pw_long with quarter period aggregation by clinic.")
 
 
 if __name__ == "__main__":
