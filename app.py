@@ -128,26 +128,9 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
             code_cell.font = RED_FONT
 
             dob_cell = report.cell(row=row_index, column=dob_column)
-            dob_cell.fill = RED_FILL
-            dob_cell.font = RED_FONT
-
-            if registered_column is not None:
-                registered_value = normalize_date(row_values[registered_column - 1])
-                if dob_value is not None and registered_value is not None and dob_value > registered_value:
-                    registered_cell = report.cell(row=row_index, column=registered_column)
-                    registered_cell.fill = RED_FILL
-                    registered_cell.font = RED_FONT
-
-            for column in comparison_columns:
-                compared_value = normalize_date(row_values[column - 1])
-                if dob_value is not None and compared_value is not None and dob_value > compared_value:
-                    compared_cell = report.cell(row=row_index, column=column)
-                    compared_cell.fill = RED_FILL
-                    compared_cell.font = RED_FONT
-
-            status_cell = report.cell(row=row_index, column=len(report_headers))
-            status_cell.fill = RED_FILL
-            status_cell.font = RED_FONT
+            if issues:
+                dob_cell.fill = RED_FILL
+                dob_cell.font = RED_FONT
 
     duplicate_code_count = len(duplicate_codes)
     affected_rows = missing_count + duplicate_row_count
