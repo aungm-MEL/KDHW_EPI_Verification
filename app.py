@@ -15,6 +15,99 @@ CODE_HEADER = "children_code"
 VERIFICATION_SHEET = "children_verification"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
+SOURCE_FIELD_RULES = [
+    ("BCG", "BCG_other", "BCG_source"),
+    ("OPV_first_time_dose", "OPV_first_time_dose_other", "OPV1_source"),
+    ("OPV_second_time_dose", "OPV_second_time_dose_other", "OPV2_source"),
+    ("OPV_third_time_dose", "OPV_third_time_dose_other", "OPV3_source"),
+    ("Penta_first_time_dose", "Penta_first_time_dose_other", "Penta1_source"),
+    ("Penta_second_time_dose", "Penta_second_time_dose_other", "Penta2_source"),
+    ("Penta_third_time_dose", "Penta_third_time_dose_other", "Penta3_source"),
+    ("Penta_fourth_time_dose", "Penta_fourth_time_dose_other", "Penta4_source"),
+    ("MMR_first_time_dose", "MMR_first_time_dose_other", "MMR1_source"),
+    ("MMR_second_time_dose", "MMR_second_time_dose_other", "MMR2_source"),
+    ("JE_first_time_dose", "JE_first_time_dose_other", "JE1_source"),
+    ("JE_second_time_dose", "JE_second_time_dose_other", "JE2_source"),
+    ("HPV_first_time_dose", "HPV_first_time_dose_other", "HPV1_source"),
+    ("HPV_second_time_dose", "HPV_second_time_dose_other", "HPV2_source"),
+    ("HepB", "HepB_other", "HepB_source"),
+    ("IPV", "IPV_other", "IPV_source"),
+    ("PCV_first_time_dose", "PCV_first_time_dose_other", "PCV1_source"),
+    ("PCV_second_time_dose", "PCV_second_time_dose_other", "PCV2_source"),
+    ("PCV_third_time_dose", "PCV_third_time_dose_other", "PCV3_source"),
+    ("Rota_first_time_dose", "Rota_first_time_dose_other", "Rota1_source"),
+    ("Rota_second_time_dose", "Rota_second_time_dose_other", "Rota2_source"),
+]
+EXCLUDED_OUTPUT_HEADERS = {
+    "BCG",
+    "BCG_other",
+    "BCG_reporting_month",
+    "OPV_first_time_dose",
+    "OPV_first_time_dose_other",
+    "OPV_first_time_dose_reporting_month",
+    "OPV_second_time_dose",
+    "OPV_second_time_dose_other",
+    "OPV_second_time_dose_reporting_month",
+    "OPV_third_time_dose",
+    "OPV_third_time_dose_other",
+    "OPV_third_time_dose_reporting_month",
+    "Penta_first_time_dose",
+    "Penta_first_time_dose_other",
+    "Penta_first_time_dose_reporting_month",
+    "Penta_second_time_dose",
+    "Penta_second_time_dose_other",
+    "Penta_second_time_dose_reporting_month",
+    "Penta_third_time_dose",
+    "Penta_third_time_dose_other",
+    "Penta_third_time_dose_reporting_month",
+    "Penta_fourth_time_dose",
+    "Penta_fourth_time_dose_other",
+    "Penta_fourth_time_dose_reporting_month",
+    "MMR_first_time_dose",
+    "MMR_first_time_dose_other",
+    "MMR_first_time_dose_reporting_month",
+    "MMR_second_time_dose",
+    "MMR_second_time_dose_other",
+    "MMR_second_time_dose_reporting_month",
+    "JE_first_time_dose",
+    "JE_first_time_dose_other",
+    "JE_first_time_dose_reporting_month",
+    "JE_second_time_dose",
+    "JE_second_time_dose_other",
+    "JE_second_time_dose_reporting_month",
+    "HPV_first_time_dose",
+    "HPV_first_time_dose_other",
+    "HPV_first_time_dose_reporting_month",
+    "HPV_second_time_dose",
+    "HPV_second_time_dose_other",
+    "HPV_second_time_dose_reporting_month",
+    "HepB",
+    "HepB_other",
+    "HepB_reporting_month",
+    "IPV",
+    "IPV_other",
+    "IPV_reporting_month",
+    "PCV_first_time_dose",
+    "PCV_first_time_dose_other",
+    "PCV_first_time_dose_reporting_month",
+    "PCV_second_time_dose",
+    "PCV_second_time_dose_other",
+    "PCV_second_time_dose_reporting_month",
+    "PCV_third_time_dose",
+    "PCV_third_time_dose_other",
+    "PCV_third_time_dose_reporting_month",
+    "Rota_first_time_dose",
+    "Rota_first_time_dose_other",
+    "Rota_first_time_dose_reporting_month",
+    "Rota_second_time_dose",
+    "Rota_second_time_dose_other",
+    "Rota_second_time_dose_reporting_month",
+    "full_prevention",
+    "full_prevention_reporting_month",
+    "complete_dose",
+    "complete_dose_reporting_month",
+    "comments",
+}
 DATE_COLUMNS = [
     "registered_date",
     "BCG",
@@ -44,6 +137,18 @@ def normalize_date(value: object):
     if isinstance(value, date):
         return value
     return None
+
+
+def build_source_value(date_value: object, other_value: object) -> str:
+    if normalize_code(other_value).casefold() == "yes":
+        return "Other"
+    if normalize_date(date_value) is not None:
+        return "KDHW"
+    return "Not received yet"
+
+
+def should_exclude_output_column(header: object) -> bool:
+    return isinstance(header, str) and header in EXCLUDED_OUTPUT_HEADERS
 
 
 def load_source_workbook(uploaded_file):
@@ -80,8 +185,13 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
     report = output.active
     report.title = VERIFICATION_SHEET
 
-    report_headers = headers + ["verification_status"]
+    included_columns = [index for index, header in enumerate(headers, start=1) if not should_exclude_output_column(header)]
+    present_source_rules = [rule for rule in SOURCE_FIELD_RULES if rule[0] in headers and rule[1] in headers]
+    source_columns = [source_header for _, _, source_header in present_source_rules]
+    report_headers = [headers[index - 1] for index in included_columns] + source_columns + ["verification_status"]
     report.append(report_headers)
+
+    report_column_map = {source_index: report_index for report_index, source_index in enumerate(included_columns, start=1)}
 
     missing_count = 0
     duplicate_row_count = 0
@@ -119,15 +229,20 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
             else:
                 status = f"{status}; " + "; ".join(issues)
 
-        row_values.append(status)
-        report.append(row_values)
+        filtered_row_values = [row_values[index - 1] for index in included_columns]
+        derived_source_values = []
+        for date_header, other_header, _source_header in present_source_rules:
+            date_value = row_values[headers.index(date_header)]
+            other_value = row_values[headers.index(other_header)]
+            derived_source_values.append(build_source_value(date_value, other_value))
+        report.append(filtered_row_values + derived_source_values + [status])
 
         if status != "OK":
-            code_cell = report.cell(row=row_index, column=code_column)
+            code_cell = report.cell(row=row_index, column=report_column_map[code_column])
             code_cell.fill = RED_FILL
             code_cell.font = RED_FONT
 
-            dob_cell = report.cell(row=row_index, column=dob_column)
+            dob_cell = report.cell(row=row_index, column=report_column_map[dob_column])
             if issues:
                 dob_cell.fill = RED_FILL
                 dob_cell.font = RED_FONT
