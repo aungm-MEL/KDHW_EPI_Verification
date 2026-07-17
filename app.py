@@ -363,6 +363,7 @@ def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
 
     report.append(output_headers + ["verification_status"])
 
+    missing_row_count = 0
     duplicate_row_count = 0
     unlogical_row_count = 0
     affected_row_count = 0
@@ -375,7 +376,10 @@ def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
         status = "OK"
         issues: list[str] = []
 
-        if mother_code and mother_code in duplicate_codes:
+        if not mother_code:
+            status = "Missing mother_code"
+            missing_row_count += 1
+        elif mother_code in duplicate_codes:
             status = "Duplicate mother_code"
             duplicate_row_count += 1
 
@@ -424,6 +428,7 @@ def build_pw_verification_sheet(output: Workbook, pw_sheet) -> dict[str, int]:
 
     summary = {
         "rows": len(rows),
+        "missing_rows": missing_row_count,
         "duplicate_rows": duplicate_row_count,
         "duplicate_codes": len(duplicate_codes),
         "unlogical_rows": unlogical_row_count,
@@ -642,9 +647,10 @@ def main() -> None:
     st.subheader("PW sheet checks")
     pw_col1, pw_col2, pw_col3, pw_col4 = st.columns(4)
     pw_col1.metric("PW rows checked", pw_summary["rows"])
-    pw_col2.metric("Duplicate mother_code rows", pw_summary["duplicate_rows"])
-    pw_col3.metric("Duplicate mother_code values", pw_summary["duplicate_codes"])
-    pw_col4.metric("PW rows with unlogical Td records", pw_summary["unlogical_rows"])
+    pw_col2.metric("Missing mother_code rows", pw_summary["missing_rows"])
+    pw_col3.metric("Duplicate mother_code rows", pw_summary["duplicate_rows"])
+    pw_col4.metric("Duplicate mother_code values", pw_summary["duplicate_codes"])
+    st.metric("PW rows with unlogical Td records", pw_summary["unlogical_rows"])
     st.info(f"PW rows with issues: {pw_summary['affected_rows']}")
 
     report_bytes = workbook_to_bytes(report_workbook)
