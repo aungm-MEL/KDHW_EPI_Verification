@@ -13,6 +13,7 @@ APP_TITLE = "KDHW Children Verification"
 SOURCE_SHEET = "children"
 CODE_HEADER = "children_code"
 VERIFICATION_SHEET = "children_verification"
+LONG_FORM_SHEET = "children_long_form"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -80,8 +81,14 @@ DOSE_DATE_HEADERS = {
     "Penta1": "Penta_first_time_dose",
     "Penta2": "Penta_second_time_dose",
     "Penta3": "Penta_third_time_dose",
+    "Penta4": "Penta_fourth_time_dose",
     "MMR1": "MMR_first_time_dose",
     "MMR2": "MMR_second_time_dose",
+    "JE1": "JE_first_time_dose",
+    "JE2": "JE_second_time_dose",
+    "IPV": "IPV",
+    "Rota1": "Rota_first_time_dose",
+    "Rota2": "Rota_second_time_dose",
 }
 DOSE_SOURCE_HEADERS = {
     "BCG": "BCG_source",
@@ -91,9 +98,49 @@ DOSE_SOURCE_HEADERS = {
     "Penta1": "Penta1_source",
     "Penta2": "Penta2_source",
     "Penta3": "Penta3_source",
+    "Penta4": "Penta4_source",
     "MMR1": "MMR1_source",
     "MMR2": "MMR2_source",
+    "JE1": "JE1_source",
+    "JE2": "JE2_source",
+    "IPV": "IPV_source",
+    "Rota1": "Rota1_source",
+    "Rota2": "Rota2_source",
 }
+DOSE_REPORTING_HEADERS = {
+    "BCG": "BCG_reporting_month",
+    "OPV1": "OPV_first_time_dose_reporting_month",
+    "OPV2": "OPV_second_time_dose_reporting_month",
+    "OPV3": "OPV_third_time_dose_reporting_month",
+    "Penta1": "Penta_first_time_dose_reporting_month",
+    "Penta2": "Penta_second_time_dose_reporting_month",
+    "Penta3": "Penta_third_time_dose_reporting_month",
+    "Penta4": "Penta_fourth_time_dose_reporting_month",
+    "MMR1": "MMR_first_time_dose_reporting_month",
+    "MMR2": "MMR_second_time_dose_reporting_month",
+    "JE1": "JE_first_time_dose_reporting_month",
+    "JE2": "JE_second_time_dose_reporting_month",
+    "IPV": "IPV_reporting_month",
+    "Rota1": "Rota_first_time_dose_reporting_month",
+    "Rota2": "Rota_second_time_dose_reporting_month",
+}
+LONG_FORM_DOSES = [
+    "BCG",
+    "OPV1",
+    "OPV2",
+    "OPV3",
+    "Penta1",
+    "Penta2",
+    "Penta3",
+    "Penta4",
+    "MMR1",
+    "MMR2",
+    "JE1",
+    "JE2",
+    "IPV",
+    "Rota1",
+    "Rota2",
+]
 U1_REQUIRED_DOSES = ["BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1"]
 ONE_TO_FIVE_REQUIRED_DOSES = ["OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1"]
 COMPLETION_CHECK_DOSES = ["BCG", "OPV1", "OPV2", "OPV3", "Penta1", "Penta2", "Penta3", "MMR1", "MMR2"]
@@ -158,6 +205,18 @@ def calculate_completed_dose(age_months, source_values: dict[str, str], date_val
 
     last_kdhw_date = max(kdhw_dates)
     return f"{group_label} completed in {quarter_label(last_kdhw_date)}"
+
+
+def datediff_months(start_date: date | None, end_date: date | None):
+    if start_date is None or end_date is None:
+        return None
+    if end_date < start_date:
+        return None
+
+    months = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
+    if end_date.day < start_date.day:
+        months -= 1
+    return months
 
 
 def build_source_value(date_value: object, other_value: object) -> str:
@@ -229,11 +288,28 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
     output = Workbook()
     report = output.active
     report.title = VERIFICATION_SHEET
+    long_form = output.create_sheet(title=LONG_FORM_SHEET)
 
     included_columns, report_headers, report_column_map = build_output_columns(headers)
     present_source_rules = [rule for rule in SOURCE_FIELD_RULES if rule[0] in headers and rule[1] in headers]
+    source_header_to_dose = {source_header: dose_key for dose_key, source_header in DOSE_SOURCE_HEADERS.items()}
+    other_header_to_rule = {rule[1]: rule for rule in present_source_rules}
+
     report_headers = report_headers + ["completed_dose", "verification_status"]
     report.append(report_headers)
+
+    if "IDP" not in headers:
+        raise KeyError("Column 'IDP' was not found in sheet 'children'.")
+    idp_column = headers.index("IDP") + 1
+    static_columns = list(range(1, idp_column + 1))
+    long_form_headers = [headers[index - 1] for index in static_columns] + [
+        "completed_dose",
+        "vaccine_dose",
+        "reporting_month",
+        "source",
+        "age_at_dose",
+    ]
+    long_form.append(long_form_headers)
 
     missing_count = 0
     duplicate_row_count = 0
@@ -275,16 +351,15 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
         source_values_by_dose: dict[str, str] = {}
         for index in included_columns:
             header = headers[index - 1]
-            if isinstance(header, str) and header in {other_header for _, other_header, _ in present_source_rules}:
-                date_header, other_header, _source_header = next(rule for rule in present_source_rules if rule[1] == header)
+            if isinstance(header, str) and header in other_header_to_rule:
+                date_header, other_header, source_header = other_header_to_rule[header]
                 date_value = row_values[headers.index(date_header)]
                 other_value = row_values[headers.index(other_header)]
                 source_value = build_source_value(date_value, other_value)
                 output_row_values.append(source_value)
-                for dose_key, source_header in DOSE_SOURCE_HEADERS.items():
-                    if source_header == _source_header:
-                        source_values_by_dose[dose_key] = source_value
-                        break
+                dose_key = source_header_to_dose.get(source_header)
+                if dose_key is not None:
+                    source_values_by_dose[dose_key] = source_value
             else:
                 output_row_values.append(row_values[index - 1])
 
@@ -297,6 +372,28 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
         completed_dose_value = calculate_completed_dose(age_months, source_values_by_dose, dose_date_values)
 
         report.append(output_row_values + [completed_dose_value, status])
+
+        static_values = [row_values[index - 1] for index in static_columns]
+        dob_for_age = normalize_date(row_values[dob_column - 1])
+        for dose_key in LONG_FORM_DOSES:
+            date_header = DOSE_DATE_HEADERS.get(dose_key)
+            reporting_header = DOSE_REPORTING_HEADERS.get(dose_key)
+            source_value = source_values_by_dose.get(dose_key, "Not received yet")
+
+            dose_date_value = dose_date_values.get(dose_key)
+            reporting_month_value = row_values[headers.index(reporting_header)] if reporting_header in headers else None
+            age_at_dose = datediff_months(dob_for_age, dose_date_value)
+
+            long_form.append(
+                static_values
+                + [
+                    completed_dose_value,
+                    dose_key,
+                    reporting_month_value,
+                    source_value,
+                    age_at_dose,
+                ]
+            )
 
         if status != "OK":
             code_cell = report.cell(row=row_index, column=report_column_map[code_column])
