@@ -100,6 +100,30 @@ def should_exclude_output_column(header: object) -> bool:
     return isinstance(header, str) and header in EXCLUDED_OUTPUT_HEADERS
 
 
+def build_output_columns(headers: list[object]) -> tuple[list[int], list[str], dict[int, int]]:
+    included_columns: list[int] = []
+    output_headers: list[str] = []
+    source_column_map: dict[int, int] = {}
+
+    other_to_source = {other_header: source_header for _, other_header, source_header in SOURCE_FIELD_RULES}
+
+    for source_index, header in enumerate(headers, start=1):
+        if should_exclude_output_column(header):
+            continue
+
+        if isinstance(header, str) and header in other_to_source:
+            included_columns.append(source_index)
+            source_column_map[source_index] = len(output_headers) + 1
+            output_headers.append(other_to_source[header])
+            continue
+
+        included_columns.append(source_index)
+        source_column_map[source_index] = len(output_headers) + 1
+        output_headers.append(header if isinstance(header, str) else "")
+
+    return included_columns, output_headers, source_column_map
+
+
 def load_source_workbook(uploaded_file):
     if uploaded_file is None:
         raise ValueError("Please upload a workbook to verify.")
@@ -134,13 +158,10 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
     report = output.active
     report.title = VERIFICATION_SHEET
 
-    included_columns = [index for index, header in enumerate(headers, start=1) if not should_exclude_output_column(header)]
+    included_columns, report_headers, report_column_map = build_output_columns(headers)
     present_source_rules = [rule for rule in SOURCE_FIELD_RULES if rule[0] in headers and rule[1] in headers]
-    source_columns = [source_header for _, _, source_header in present_source_rules]
-    report_headers = [headers[index - 1] for index in included_columns] + source_columns + ["verification_status"]
+    report_headers = report_headers + ["verification_status"]
     report.append(report_headers)
-
-    report_column_map = {source_index: report_index for report_index, source_index in enumerate(included_columns, start=1)}
 
     missing_count = 0
     duplicate_row_count = 0
@@ -178,13 +199,18 @@ def build_verification_report(source_sheet) -> tuple[Workbook, dict[str, int]]:
             else:
                 status = f"{status}; " + "; ".join(issues)
 
-        filtered_row_values = [row_values[index - 1] for index in included_columns]
-        derived_source_values = []
-        for date_header, other_header, _source_header in present_source_rules:
-            date_value = row_values[headers.index(date_header)]
-            other_value = row_values[headers.index(other_header)]
-            derived_source_values.append(build_source_value(date_value, other_value))
-        report.append(filtered_row_values + derived_source_values + [status])
+        output_row_values: list[object] = []
+        for index in included_columns:
+            header = headers[index - 1]
+            if isinstance(header, str) and header in {other_header for _, other_header, _ in present_source_rules}:
+                date_header, other_header, _source_header = next(rule for rule in present_source_rules if rule[1] == header)
+                date_value = row_values[headers.index(date_header)]
+                other_value = row_values[headers.index(other_header)]
+                output_row_values.append(build_source_value(date_value, other_value))
+            else:
+                output_row_values.append(row_values[index - 1])
+
+        report.append(output_row_values + [status])
 
         if status != "OK":
             code_cell = report.cell(row=row_index, column=report_column_map[code_column])
