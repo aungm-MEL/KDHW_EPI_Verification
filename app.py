@@ -20,6 +20,7 @@ LONG_FORM_SHEET = "children_long_form"
 PW_VERIFICATION_SHEET = "pw_verification"
 PW_LONG_FORM_SHEET = "pw_long"
 VTHC_DISAGGREGATE_SHEET = "VTHC_dose_disaggregate"
+INDICATOR_SHEET = "indicators"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -233,6 +234,54 @@ DISAGGREGATE_HEADERS = [
     "Td At least one dose",
 ]
 DISAGGREGATE_COUNT_COLUMNS = DISAGGREGATE_HEADERS[8:]
+INDICATOR_HEADERS = [
+    "Year",
+    "Organization",
+    "Project Name",
+    "indicator",
+    "Q1 Target",
+    "Q1 U1 Male",
+    "Q1 U1 Female",
+    "Q1 1-5 Male",
+    "Q1 1-5 Female",
+    "Q1 Total",
+    "Q2 Target",
+    "Q2 U1 Male",
+    "Q2 U1 Female",
+    "Q2 1-5 Male",
+    "Q2 1-5 Female",
+    "Q2 Total",
+    "Q3 Target",
+    "Q3 U1 Male",
+    "Q3 U1 Female",
+    "Q3 1-5 Male",
+    "Q3 1-5 Female",
+    "Q3 Total",
+    "Q4 Target",
+    "Q4 U1 Male",
+    "Q4 U1 Female",
+    "Q4 1-5 Male",
+    "Q4 1-5 Female",
+    "Q4 Total",
+]
+INDICATOR_DEFINITIONS = [
+    ("Penta3 under 1-yr-old", "Penta3", {"U1"}),
+    ("MMR1 under 1-yr-old", "MMR1", {"U1"}),
+    ("Penta1 under 5-yr-old", "Penta1", {"U1", "U5"}),
+    ("Penta3 under 5-yr-old", "Penta3", {"U1", "U5"}),
+    ("MMR1 under 5-yr-old", "MMR1", {"U1", "U5"}),
+    ("MMR2 under 5-yr-old", "MMR2", {"U1", "U5"}),
+    ("Full dose under 5-yr-old", "CD", {"U1", "U5"}),
+    ("At least one dose under 5-yr-old", "ALOD", {"U1", "U5"}),
+]
+SEX_HEADER_CANDIDATES = {
+    "sex",
+    "gender",
+    "child_sex",
+    "child_gender",
+    "sex_of_child",
+    "gender_of_child",
+}
 
 
 def normalize_code(value: object) -> str:
@@ -370,6 +419,28 @@ def age_bucket(age_months: int | None):
     return None
 
 
+def quarter_number(value: date) -> int:
+    return ((value.month - 1) // 3) + 1
+
+
+def sex_bucket(value: object) -> str | None:
+    text = normalize_code(value).casefold()
+    if not text:
+        return None
+    if text in {"m", "male", "boy", "boys"}:
+        return "Male"
+    if text in {"f", "female", "girl", "girls"}:
+        return "Female"
+    return None
+
+
+def find_first_matching_header(headers: list[object], candidates: set[str]) -> str | None:
+    for header in headers:
+        if isinstance(header, str) and normalize_code(header).casefold() in candidates:
+            return header
+    return None
+
+
 def dose_u1_eligible(dose_key: str, age_at_dose: int | None) -> bool:
     if age_at_dose is None:
         return False
@@ -458,6 +529,103 @@ def project_name_for_row(year: int, clinic: str, lookup: dict[tuple[int, str], s
     if year in {2025, 2026}:
         return lookup.get((year, normalize_code(clinic).casefold()), "")
     return ""
+
+
+def init_indicator_sex_bucket() -> dict[str, set[str]]:
+    return {
+        "U1 Male": set(),
+        "U1 Female": set(),
+        "1-5 Male": set(),
+        "1-5 Female": set(),
+    }
+
+
+def init_indicator_counts() -> dict[str, dict[int, dict[str, set[str]]]]:
+    return {
+        label: {1: init_indicator_sex_bucket(), 2: init_indicator_sex_bucket(), 3: init_indicator_sex_bucket(), 4: init_indicator_sex_bucket()}
+        for label, _metric, _ages in INDICATOR_DEFINITIONS
+    }
+
+
+def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
+    if LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    child_ws = output[LONG_FORM_SHEET]
+    report = output.create_sheet(title=INDICATOR_SHEET)
+    report.append(INDICATOR_HEADERS)
+
+    child_headers = [child_ws.cell(1, c).value for c in range(1, child_ws.max_column + 1)]
+    child_idx = {name: child_headers.index(name) + 1 for name in child_headers if isinstance(name, str)}
+    sex_header = find_first_matching_header(child_headers, SEX_HEADER_CANDIDATES)
+    if sex_header is None:
+        raise KeyError("Could not find a sex/gender column for indicators. Expected one of: sex, gender, child_sex, child_gender, sex_of_child, gender_of_child.")
+    sex_col = child_idx[sex_header]
+
+    project_lookup = build_project_lookup(source_workbook)
+    aggregate: dict[tuple[int, str, str], dict[str, dict[int, dict[str, set[str]]]]] = {}
+
+    for r in range(2, child_ws.max_row + 1):
+        children_code = normalize_code(child_ws.cell(r, child_idx["children_code"]).value)
+        reporting_month = normalize_date(child_ws.cell(r, child_idx["reporting_month"]).value)
+        source_value = normalize_code(child_ws.cell(r, child_idx["source"]).value)
+        vaccine_dose = normalize_code(child_ws.cell(r, child_idx["vaccine_dose"]).value)
+        if not children_code or reporting_month is None or source_value != "KDHW":
+            continue
+
+        sex_value = sex_bucket(child_ws.cell(r, sex_col).value) if sex_col is not None else None
+        if sex_value is None:
+            continue
+
+        year = reporting_month.year
+        quarter = quarter_number(reporting_month)
+        clinic = normalize_code(child_ws.cell(r, child_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        aggregate_key = (year, "KDHW", project_name)
+        indicator_counts = aggregate.setdefault(aggregate_key, init_indicator_counts())
+
+        age_at_dose = normalize_age_months(child_ws.cell(r, child_idx["age_at_dose"]).value)
+        dose_age = age_bucket(age_at_dose)
+        if dose_age in {"U1", "U5"}:
+            for label, metric, age_groups in INDICATOR_DEFINITIONS:
+                if metric != vaccine_dose or dose_age not in age_groups:
+                    continue
+                age_label = "U1" if dose_age == "U1" else "1-5"
+                indicator_counts[label][quarter][f"{age_label} {sex_value}"].add(children_code)
+
+        age_months = normalize_age_months(child_ws.cell(r, child_idx["ageInMonths"]).value)
+        current_age_group = age_bucket(age_months)
+        if current_age_group in {"U1", "U5"}:
+            current_age_label = "U1" if current_age_group == "U1" else "1-5"
+            indicator_counts["At least one dose under 5-yr-old"][quarter][f"{current_age_label} {sex_value}"].add(children_code)
+
+        completed_value = normalize_code(child_ws.cell(r, child_idx["completed_dose"]).value)
+        completed_info = parse_completed_period(completed_value)
+        if completed_info:
+            completed_group, completed_period = completed_info
+            completed_quarter_match = re.match(r"Q([1-4])_(\d{4})", completed_period)
+            if completed_quarter_match:
+                completed_quarter = int(completed_quarter_match.group(1))
+                completed_year = int(completed_quarter_match.group(2))
+                completed_project_name = project_name_for_row(completed_year, clinic, project_lookup)
+                completed_key = (completed_year, "KDHW", completed_project_name)
+                completed_counts = aggregate.setdefault(completed_key, init_indicator_counts())
+                completed_age_label = "U1" if completed_group == "U1" else "1-5"
+                completed_counts["Full dose under 5-yr-old"][completed_quarter][f"{completed_age_label} {sex_value}"].add(children_code)
+
+    for year, organization, project_name in sorted(aggregate.keys()):
+        indicator_counts = aggregate[(year, organization, project_name)]
+        for label, _metric, _age_groups in INDICATOR_DEFINITIONS:
+            row = [year, organization, project_name, label]
+            for quarter in range(1, 5):
+                quarter_counts = indicator_counts[label][quarter]
+                u1_male = len(quarter_counts["U1 Male"])
+                u1_female = len(quarter_counts["U1 Female"])
+                one_to_five_male = len(quarter_counts["1-5 Male"])
+                one_to_five_female = len(quarter_counts["1-5 Female"])
+                total = u1_male + u1_female + one_to_five_male + one_to_five_female
+                row.extend(["", u1_male, u1_female, one_to_five_male, one_to_five_female, total])
+            report.append(row)
 
 
 def build_vthc_dose_disaggregate_sheet(output: Workbook, source_workbook: Workbook) -> None:
@@ -953,6 +1121,7 @@ def main() -> None:
         report_workbook, summary = build_verification_report(source_sheet)
         pw_summary = build_pw_verification_sheet(report_workbook, pw_sheet)
         build_vthc_dose_disaggregate_sheet(report_workbook, source_workbook)
+        build_indicator_sheet(report_workbook, source_workbook)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -998,6 +1167,7 @@ def main() -> None:
     st.write("PW unlogical checks: Td1 not received while Td2 received, and Td2 date earlier than Td1 date. Rows are flagged and mother_code is highlighted red.")
     st.write("Long-form sheets include only received doses; rows with source 'Not received yet' are excluded in children_long_form and pw_long.")
     st.write("VTHC_dose_disaggregate is built from children_long_form and pw_long with quarter period aggregation by clinic.")
+    st.write("indicators is built from children_long_form with quarterly sex and age disaggregation for Penta1, Penta3, MMR1, MMR2, full dose, and at least one dose under 5.")
 
 
 if __name__ == "__main__":
