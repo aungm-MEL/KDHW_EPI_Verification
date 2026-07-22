@@ -521,6 +521,15 @@ def build_project_lookup(source_workbook: Workbook) -> dict[tuple[int, str], str
     return lookup
 
 
+def build_projects_by_year(lookup: dict[tuple[int, str], str]) -> dict[int, list[str]]:
+    projects_by_year: dict[int, set[str]] = {}
+    for (year, _clinic), project_name in lookup.items():
+        if not project_name:
+            continue
+        projects_by_year.setdefault(year, set()).add(project_name)
+    return {year: sorted(project_names) for year, project_names in projects_by_year.items()}
+
+
 def project_name_for_row(year: int, clinic: str, lookup: dict[tuple[int, str], str]) -> str:
     if year == 2023:
         return "RISE"
@@ -563,6 +572,7 @@ def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
     sex_col = child_idx[sex_header]
 
     project_lookup = build_project_lookup(source_workbook)
+    projects_by_year = build_projects_by_year(project_lookup)
     aggregate: dict[tuple[int, str, str], dict[str, dict[int, dict[str, set[str]]]]] = {}
 
     for r in range(2, child_ws.max_row + 1):
@@ -613,8 +623,13 @@ def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
                 completed_age_label = "U1" if completed_group == "U1" else "1-5"
                 completed_counts["Full dose under 5-yr-old"][completed_quarter][f"{completed_age_label} {sex_value}"].add(children_code)
 
-    for year, organization, project_name in sorted(aggregate.keys()):
-        indicator_counts = aggregate[(year, organization, project_name)]
+    output_keys = set(aggregate.keys())
+    for year in (2025, 2026):
+        for project_name in projects_by_year.get(year, []):
+            output_keys.add((year, "KDHW", project_name))
+
+    for year, organization, project_name in sorted(output_keys):
+        indicator_counts = aggregate.setdefault((year, organization, project_name), init_indicator_counts())
         for label, _metric, _age_groups in INDICATOR_DEFINITIONS:
             row = [year, organization, project_name, label]
             for quarter in range(1, 5):
