@@ -800,7 +800,6 @@ def build_cummu_indicator_sheet(output: Workbook, source_workbook: Workbook) -> 
         children_code = normalize_code(child_ws.cell(r, child_idx["children_code"]).value)
         reporting_month = normalize_date(child_ws.cell(r, child_idx["reporting_month"]).value)
         source_value = normalize_code(child_ws.cell(r, child_idx["source"]).value)
-        vaccine_dose = normalize_code(child_ws.cell(r, child_idx["vaccine_dose"]).value)
         if not children_code or reporting_month is None or source_value != "KDHW":
             continue
 
@@ -813,15 +812,6 @@ def build_cummu_indicator_sheet(output: Workbook, source_workbook: Workbook) -> 
         project_name = project_name_for_row(year, clinic, project_lookup)
         aggregate_key = (year, "KDHW", project_name)
         indicator_counts = aggregate.setdefault(aggregate_key, init_cummu_indicator_counts())
-
-        age_at_dose = normalize_age_months(child_ws.cell(r, child_idx["age_at_dose"]).value)
-        dose_age = age_bucket(age_at_dose)
-        if dose_age in {"U1", "U5"}:
-            for label, metric, age_groups in INDICATOR_DEFINITIONS:
-                if metric != vaccine_dose or dose_age not in age_groups:
-                    continue
-                age_label = "U1" if dose_age == "U1" else "1-5"
-                indicator_counts[label][f"{age_label} {sex_value}"].add(children_code)
 
         age_months = normalize_age_months(child_ws.cell(r, child_idx["ageInMonths"]).value)
         current_age_group = age_bucket(age_months)
