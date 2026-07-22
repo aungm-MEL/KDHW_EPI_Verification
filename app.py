@@ -22,6 +22,7 @@ PW_LONG_FORM_SHEET = "pw_long"
 VTHC_DISAGGREGATE_SHEET = "VTHC_dose_disaggregate"
 INDICATOR_SHEET = "indicators"
 CUMULATIVE_SHEET = "cummulative_sheet"
+CUMMU_INDICATOR_SHEET = "Cummu_indicator"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -277,6 +278,17 @@ INDICATOR_HEADERS = [
     "Q4 1-5 Male",
     "Q4 1-5 Female",
     "Q4 Total",
+]
+CUMMU_INDICATOR_HEADERS = [
+    "Year",
+    "Organization",
+    "Project Name",
+    "indicator",
+    "Annual Target",
+    "Annual U1 Male",
+    "Annaul U1 Female",
+    "Annual 1-5 Male",
+    "Annual 1-5 Female",
 ]
 INDICATOR_DEFINITIONS = [
     ("Penta3 under 1-yr-old", "Penta3", {"U1"}),
@@ -587,6 +599,13 @@ def init_indicator_counts() -> dict[str, dict[int, dict[str, set[str]]]]:
     }
 
 
+def init_cummu_indicator_counts() -> dict[str, dict[str, set[str]]]:
+    return {
+        label: init_indicator_sex_bucket()
+        for label, _metric, _ages in INDICATOR_DEFINITIONS
+    }
+
+
 def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
     if LONG_FORM_SHEET not in output.sheetnames:
         return
@@ -758,6 +777,93 @@ def build_cummulative_sheet(output: Workbook, source_workbook: Workbook) -> None
                 len(bucket["Td At least one dose"]),
             ]
         )
+
+
+def build_cummu_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
+    if LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    child_ws = output[LONG_FORM_SHEET]
+    report = output.create_sheet(title=CUMMU_INDICATOR_SHEET)
+    report.append(CUMMU_INDICATOR_HEADERS)
+
+    child_headers = [child_ws.cell(1, c).value for c in range(1, child_ws.max_column + 1)]
+    child_idx = {name: child_headers.index(name) + 1 for name in child_headers if isinstance(name, str)}
+    sex_header = find_first_matching_header(child_headers, SEX_HEADER_CANDIDATES)
+    if sex_header is None:
+        raise KeyError("Could not find a sex/gender column for indicators. Expected one of: sex, gender, child_sex, child_gender, sex_of_child, gender_of_child.")
+    sex_col = child_idx[sex_header]
+
+    project_lookup = build_project_lookup(source_workbook)
+    projects_by_year = build_projects_by_year(project_lookup)
+    aggregate: dict[tuple[int, str, str], dict[str, dict[str, set[str]]]] = {}
+
+    for r in range(2, child_ws.max_row + 1):
+        children_code = normalize_code(child_ws.cell(r, child_idx["children_code"]).value)
+        reporting_month = normalize_date(child_ws.cell(r, child_idx["reporting_month"]).value)
+        source_value = normalize_code(child_ws.cell(r, child_idx["source"]).value)
+        vaccine_dose = normalize_code(child_ws.cell(r, child_idx["vaccine_dose"]).value)
+        if not children_code or reporting_month is None or source_value != "KDHW":
+            continue
+
+        sex_value = sex_bucket(child_ws.cell(r, sex_col).value)
+        if sex_value is None:
+            continue
+
+        year = reporting_month.year
+        clinic = normalize_code(child_ws.cell(r, child_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        aggregate_key = (year, "KDHW", project_name)
+        indicator_counts = aggregate.setdefault(aggregate_key, init_cummu_indicator_counts())
+
+        age_at_dose = normalize_age_months(child_ws.cell(r, child_idx["age_at_dose"]).value)
+        dose_age = age_bucket(age_at_dose)
+        if dose_age in {"U1", "U5"}:
+            for label, metric, age_groups in INDICATOR_DEFINITIONS:
+                if metric != vaccine_dose or dose_age not in age_groups:
+                    continue
+                age_label = "U1" if dose_age == "U1" else "1-5"
+                indicator_counts[label][f"{age_label} {sex_value}"].add(children_code)
+
+        age_months = normalize_age_months(child_ws.cell(r, child_idx["ageInMonths"]).value)
+        current_age_group = age_bucket(age_months)
+        if current_age_group in {"U1", "U5"}:
+            current_age_label = "U1" if current_age_group == "U1" else "1-5"
+            indicator_counts["At least one dose under 5-yr-old"][f"{current_age_label} {sex_value}"].add(children_code)
+
+        completed_value = normalize_code(child_ws.cell(r, child_idx["completed_dose"]).value)
+        completed_info = parse_completed_period(completed_value)
+        if completed_info:
+            completed_group, completed_period = completed_info
+            completed_year = int(completed_period.split("_")[1])
+            completed_project_name = project_name_for_row(completed_year, clinic, project_lookup)
+            completed_key = (completed_year, "KDHW", completed_project_name)
+            completed_counts = aggregate.setdefault(completed_key, init_cummu_indicator_counts())
+            completed_age_label = "U1" if completed_group == "U1" else "1-5"
+            completed_counts["Full dose under 5-yr-old"][f"{completed_age_label} {sex_value}"].add(children_code)
+
+    output_keys = set(aggregate.keys())
+    for year in (2025, 2026):
+        for project_name in projects_by_year.get(year, []):
+            output_keys.add((year, "KDHW", project_name))
+
+    for year, organization, project_name in sorted(output_keys):
+        indicator_counts = aggregate.setdefault((year, organization, project_name), init_cummu_indicator_counts())
+        for label, _metric, _age_groups in INDICATOR_DEFINITIONS:
+            counts = indicator_counts[label]
+            report.append(
+                [
+                    year,
+                    organization,
+                    project_name,
+                    label,
+                    "",
+                    len(counts["U1 Male"]),
+                    len(counts["U1 Female"]),
+                    len(counts["1-5 Male"]),
+                    len(counts["1-5 Female"]),
+                ]
+            )
 
 
 def build_vthc_dose_disaggregate_sheet(output: Workbook, source_workbook: Workbook) -> None:
@@ -1255,6 +1361,7 @@ def main() -> None:
         build_vthc_dose_disaggregate_sheet(report_workbook, source_workbook)
         build_indicator_sheet(report_workbook, source_workbook)
         build_cummulative_sheet(report_workbook, source_workbook)
+        build_cummu_indicator_sheet(report_workbook, source_workbook)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -1302,6 +1409,7 @@ def main() -> None:
     st.write("VTHC_dose_disaggregate is built from children_long_form and pw_long with quarter period aggregation by clinic.")
     st.write("indicators is built from children_long_form with quarterly sex and age disaggregation for Penta1, Penta3, MMR1, MMR2, full dose, and at least one dose under 5.")
     st.write("cummulative_sheet is built from children_long_form and pw_long with yearly aggregation by clinic for ALOD and Td At least one dose.")
+    st.write("Cummu_indicator is built from children_long_form with yearly sex and age disaggregation for the same indicator set as indicators.")
 
 
 if __name__ == "__main__":
