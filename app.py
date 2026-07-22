@@ -290,6 +290,13 @@ def normalize_code(value: object) -> str:
     return str(value).strip()
 
 
+def normalize_header_key(value: object) -> str:
+    text = normalize_code(value).casefold()
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
 def normalize_date(value: object):
     if isinstance(value, datetime):
         return value.date()
@@ -436,7 +443,7 @@ def sex_bucket(value: object) -> str | None:
 
 def find_first_matching_header(headers: list[object], candidates: set[str]) -> str | None:
     for header in headers:
-        if isinstance(header, str) and normalize_code(header).casefold() in candidates:
+        if isinstance(header, str) and normalize_header_key(header) in candidates:
             return header
     return None
 
@@ -498,14 +505,15 @@ def build_project_lookup(source_workbook: Workbook) -> dict[tuple[int, str], str
 
     ws = source_workbook[reference_sheet_name]
     headers = [normalize_code(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+    normalized_headers = [normalize_header_key(header) for header in headers]
 
     year_candidates = {"year", "reporting_year", "yr"}
-    clinic_candidates = {"clinic", "clinic name", "clinic_name", "vthc", "vthc_name"}
-    project_candidates = {"project", "project name", "project_name"}
+    clinic_candidates = {"clinic", "clinics", "clinic_name", "clinic_names", "vthc", "vthc_name"}
+    project_candidates = {"project", "project_name"}
 
-    year_col = next((i + 1 for i, h in enumerate(headers) if h.casefold() in year_candidates), None)
-    clinic_col = next((i + 1 for i, h in enumerate(headers) if h.casefold() in clinic_candidates), None)
-    project_col = next((i + 1 for i, h in enumerate(headers) if h.casefold() in project_candidates), None)
+    year_col = next((i + 1 for i, h in enumerate(normalized_headers) if h in year_candidates), None)
+    clinic_col = next((i + 1 for i, h in enumerate(normalized_headers) if h in clinic_candidates), None)
+    project_col = next((i + 1 for i, h in enumerate(normalized_headers) if h in project_candidates), None)
     if year_col is None or clinic_col is None or project_col is None:
         return {}
 
