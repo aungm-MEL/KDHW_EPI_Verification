@@ -23,6 +23,8 @@ VTHC_DISAGGREGATE_SHEET = "VTHC_dose_disaggregate"
 INDICATOR_SHEET = "indicators"
 CUMULATIVE_SHEET = "cummulative_sheet"
 CUMMU_INDICATOR_SHEET = "Cummu_indicator"
+TD_ALOD_SHEET = "Td_alod"
+TD2_INDICATOR_SHEET = "TD2_indicator"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -290,7 +292,31 @@ CUMMU_INDICATOR_HEADERS = [
     "Annual 1-5 Male",
     "Annual 1-5 Female",
 ]
+TD_ALOD_HEADERS = [
+    "Year",
+    "Organization",
+    "Project Name",
+    "Indicators",
+    "Annual Target",
+    "Annual Achievement",
+]
+TD2_INDICATOR_HEADERS = [
+    "Year",
+    "Organization",
+    "Project Name",
+    "Indicators",
+    "Q1 Target",
+    "Q1 Achievement",
+    "Q2 Target",
+    "Q2 Achievement",
+    "Q3 Target",
+    "Q3 Achievement",
+    "Q4 Target",
+    "Q4 Achievement",
+]
 CUMMU_INDICATOR_LABEL = "At least one dose under 5-yr-old"
+TD_ALOD_LABEL = "Td ALOD"
+TD2_INDICATOR_LABEL = "Td Two Doses"
 INDICATOR_DEFINITIONS = [
     ("Penta3 under 1-yr-old", "Penta3", {"U1"}),
     ("MMR1 under 1-yr-old", "MMR1", {"U1"}),
@@ -604,6 +630,10 @@ def init_cummu_indicator_counts() -> dict[str, dict[str, set[str]]]:
     return {CUMMU_INDICATOR_LABEL: init_indicator_sex_bucket()}
 
 
+def init_quarter_set_counts() -> dict[int, set[str]]:
+    return {1: set(), 2: set(), 3: set(), 4: set()}
+
+
 def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
     if LONG_FORM_SHEET not in output.sheetnames:
         return
@@ -689,6 +719,57 @@ def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
                 total = u1_male + u1_female + one_to_five_male + one_to_five_female
                 row.extend(["", u1_male, u1_female, one_to_five_male, one_to_five_female, total])
             report.append(row)
+
+    if PW_LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    pw_ws = output[PW_LONG_FORM_SHEET]
+    pw_headers = [pw_ws.cell(1, c).value for c in range(1, pw_ws.max_column + 1)]
+    pw_idx = {name: pw_headers.index(name) + 1 for name in pw_headers if isinstance(name, str)}
+
+    td_alod_quarterly: dict[tuple[int, str, str], dict[int, set[str]]] = {}
+    td2_quarterly: dict[tuple[int, str, str], dict[int, set[str]]] = {}
+
+    for r in range(2, pw_ws.max_row + 1):
+        mother_code = normalize_code(pw_ws.cell(r, pw_idx["mother_code"]).value)
+        reporting_month = normalize_date(pw_ws.cell(r, pw_idx["reporting_month"]).value)
+        vaccine_dose = normalize_code(pw_ws.cell(r, pw_idx["vaccine_dose"]).value)
+        source_value = normalize_code(pw_ws.cell(r, pw_idx["source"]).value)
+        if not mother_code or reporting_month is None or source_value != "KDHW":
+            continue
+
+        year = reporting_month.year
+        quarter = quarter_number(reporting_month)
+        clinic = normalize_code(pw_ws.cell(r, pw_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        key = (year, "KDHW", project_name)
+
+        if vaccine_dose in {"Td1", "Td2"}:
+            td_alod_counts = td_alod_quarterly.setdefault(key, init_quarter_set_counts())
+            td_alod_counts[quarter].add(mother_code)
+        if vaccine_dose == "Td2":
+            td2_counts = td2_quarterly.setdefault(key, init_quarter_set_counts())
+            td2_counts[quarter].add(mother_code)
+
+    td_output_keys = set(output_keys)
+    td_output_keys.update(td_alod_quarterly.keys())
+    td_output_keys.update(td2_quarterly.keys())
+
+    for year in (2025, 2026):
+        for project_name in projects_by_year.get(year, []):
+            td_output_keys.add((year, "KDHW", project_name))
+
+    for year, organization, project_name in sorted(td_output_keys):
+        td2_counts = td2_quarterly.setdefault((year, organization, project_name), init_quarter_set_counts())
+        td_alod_counts = td_alod_quarterly.setdefault((year, organization, project_name), init_quarter_set_counts())
+
+        td2_row = [year, organization, project_name, TD2_INDICATOR_LABEL]
+        td_alod_row = [year, organization, project_name, TD_ALOD_LABEL]
+        for quarter in range(1, 5):
+            td2_row.extend(["", "", "", "", len(td2_counts[quarter])])
+            td_alod_row.extend(["", "", "", "", len(td_alod_counts[quarter])])
+        report.append(td2_row)
+        report.append(td_alod_row)
 
 
 def build_cummulative_sheet(output: Workbook, source_workbook: Workbook) -> None:
@@ -840,6 +921,87 @@ def build_cummu_indicator_sheet(output: Workbook, source_workbook: Workbook) -> 
                 len(counts["1-5 Female"]),
             ]
         )
+
+
+def build_td_alod_sheet(output: Workbook, source_workbook: Workbook) -> None:
+    if PW_LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    pw_ws = output[PW_LONG_FORM_SHEET]
+    report = output.create_sheet(title=TD_ALOD_SHEET)
+    report.append(TD_ALOD_HEADERS)
+
+    pw_headers = [pw_ws.cell(1, c).value for c in range(1, pw_ws.max_column + 1)]
+    pw_idx = {name: pw_headers.index(name) + 1 for name in pw_headers if isinstance(name, str)}
+
+    project_lookup = build_project_lookup(source_workbook)
+    projects_by_year = build_projects_by_year(project_lookup)
+    aggregate: dict[tuple[int, str, str], set[str]] = {}
+
+    for r in range(2, pw_ws.max_row + 1):
+        mother_code = normalize_code(pw_ws.cell(r, pw_idx["mother_code"]).value)
+        reporting_month = normalize_date(pw_ws.cell(r, pw_idx["reporting_month"]).value)
+        vaccine_dose = normalize_code(pw_ws.cell(r, pw_idx["vaccine_dose"]).value)
+        source_value = normalize_code(pw_ws.cell(r, pw_idx["source"]).value)
+        if not mother_code or reporting_month is None or source_value != "KDHW" or vaccine_dose not in {"Td1", "Td2"}:
+            continue
+
+        year = reporting_month.year
+        clinic = normalize_code(pw_ws.cell(r, pw_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        aggregate.setdefault((year, "KDHW", project_name), set()).add(mother_code)
+
+    output_keys = set(aggregate.keys())
+    for year in (2025, 2026):
+        for project_name in projects_by_year.get(year, []):
+            output_keys.add((year, "KDHW", project_name))
+
+    for year, organization, project_name in sorted(output_keys):
+        achievement = len(aggregate.setdefault((year, organization, project_name), set()))
+        report.append([year, organization, project_name, TD_ALOD_LABEL, "", achievement])
+
+
+def build_td2_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
+    if PW_LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    pw_ws = output[PW_LONG_FORM_SHEET]
+    report = output.create_sheet(title=TD2_INDICATOR_SHEET)
+    report.append(TD2_INDICATOR_HEADERS)
+
+    pw_headers = [pw_ws.cell(1, c).value for c in range(1, pw_ws.max_column + 1)]
+    pw_idx = {name: pw_headers.index(name) + 1 for name in pw_headers if isinstance(name, str)}
+
+    project_lookup = build_project_lookup(source_workbook)
+    projects_by_year = build_projects_by_year(project_lookup)
+    aggregate: dict[tuple[int, str, str], dict[int, set[str]]] = {}
+
+    for r in range(2, pw_ws.max_row + 1):
+        mother_code = normalize_code(pw_ws.cell(r, pw_idx["mother_code"]).value)
+        reporting_month = normalize_date(pw_ws.cell(r, pw_idx["reporting_month"]).value)
+        vaccine_dose = normalize_code(pw_ws.cell(r, pw_idx["vaccine_dose"]).value)
+        source_value = normalize_code(pw_ws.cell(r, pw_idx["source"]).value)
+        if not mother_code or reporting_month is None or source_value != "KDHW" or vaccine_dose != "Td2":
+            continue
+
+        year = reporting_month.year
+        quarter = quarter_number(reporting_month)
+        clinic = normalize_code(pw_ws.cell(r, pw_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        quarter_counts = aggregate.setdefault((year, "KDHW", project_name), init_quarter_set_counts())
+        quarter_counts[quarter].add(mother_code)
+
+    output_keys = set(aggregate.keys())
+    for year in (2025, 2026):
+        for project_name in projects_by_year.get(year, []):
+            output_keys.add((year, "KDHW", project_name))
+
+    for year, organization, project_name in sorted(output_keys):
+        quarter_counts = aggregate.setdefault((year, organization, project_name), init_quarter_set_counts())
+        row = [year, organization, project_name, TD2_INDICATOR_LABEL]
+        for quarter in range(1, 5):
+            row.extend(["", len(quarter_counts[quarter])])
+        report.append(row)
 
 
 def build_vthc_dose_disaggregate_sheet(output: Workbook, source_workbook: Workbook) -> None:
@@ -1338,6 +1500,8 @@ def main() -> None:
         build_indicator_sheet(report_workbook, source_workbook)
         build_cummulative_sheet(report_workbook, source_workbook)
         build_cummu_indicator_sheet(report_workbook, source_workbook)
+        build_td_alod_sheet(report_workbook, source_workbook)
+        build_td2_indicator_sheet(report_workbook, source_workbook)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -1386,6 +1550,8 @@ def main() -> None:
     st.write("indicators is built from children_long_form with quarterly sex and age disaggregation for Penta1, Penta3, MMR1, MMR2, full dose, and at least one dose under 5.")
     st.write("cummulative_sheet is built from children_long_form and pw_long with yearly aggregation by clinic for ALOD and Td At least one dose.")
     st.write("Cummu_indicator is built from children_long_form with yearly sex and age disaggregation for the same indicator set as indicators.")
+    st.write("Td_alod is built from pw_long with yearly project-wise unique mother_code counts for Td1 or Td2.")
+    st.write("TD2_indicator is built from pw_long with quarterly project-wise unique mother_code counts for Td2.")
 
 
 if __name__ == "__main__":
