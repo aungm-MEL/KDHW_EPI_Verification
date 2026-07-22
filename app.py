@@ -766,8 +766,8 @@ def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
         td2_row = [year, organization, project_name, TD2_INDICATOR_LABEL]
         td_alod_row = [year, organization, project_name, TD_ALOD_LABEL]
         for quarter in range(1, 5):
-            td2_row.extend(["", "", "", "", len(td2_counts[quarter])])
-            td_alod_row.extend(["", "", "", "", len(td_alod_counts[quarter])])
+            td2_row.extend(["", "", "", "", "", len(td2_counts[quarter])])
+            td_alod_row.extend(["", "", "", "", "", len(td_alod_counts[quarter])])
         report.append(td2_row)
         report.append(td_alod_row)
 
