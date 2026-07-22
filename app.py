@@ -290,6 +290,7 @@ CUMMU_INDICATOR_HEADERS = [
     "Annual 1-5 Male",
     "Annual 1-5 Female",
 ]
+CUMMU_INDICATOR_LABEL = "At least one dose under 5-yr-old"
 INDICATOR_DEFINITIONS = [
     ("Penta3 under 1-yr-old", "Penta3", {"U1"}),
     ("MMR1 under 1-yr-old", "MMR1", {"U1"}),
@@ -600,10 +601,7 @@ def init_indicator_counts() -> dict[str, dict[int, dict[str, set[str]]]]:
 
 
 def init_cummu_indicator_counts() -> dict[str, dict[str, set[str]]]:
-    return {
-        label: init_indicator_sex_bucket()
-        for label, _metric, _ages in INDICATOR_DEFINITIONS
-    }
+    return {CUMMU_INDICATOR_LABEL: init_indicator_sex_bucket()}
 
 
 def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
@@ -829,18 +827,7 @@ def build_cummu_indicator_sheet(output: Workbook, source_workbook: Workbook) -> 
         current_age_group = age_bucket(age_months)
         if current_age_group in {"U1", "U5"}:
             current_age_label = "U1" if current_age_group == "U1" else "1-5"
-            indicator_counts["At least one dose under 5-yr-old"][f"{current_age_label} {sex_value}"].add(children_code)
-
-        completed_value = normalize_code(child_ws.cell(r, child_idx["completed_dose"]).value)
-        completed_info = parse_completed_period(completed_value)
-        if completed_info:
-            completed_group, completed_period = completed_info
-            completed_year = int(completed_period.split("_")[1])
-            completed_project_name = project_name_for_row(completed_year, clinic, project_lookup)
-            completed_key = (completed_year, "KDHW", completed_project_name)
-            completed_counts = aggregate.setdefault(completed_key, init_cummu_indicator_counts())
-            completed_age_label = "U1" if completed_group == "U1" else "1-5"
-            completed_counts["Full dose under 5-yr-old"][f"{completed_age_label} {sex_value}"].add(children_code)
+            indicator_counts[CUMMU_INDICATOR_LABEL][f"{current_age_label} {sex_value}"].add(children_code)
 
     output_keys = set(aggregate.keys())
     for year in (2025, 2026):
@@ -849,21 +836,20 @@ def build_cummu_indicator_sheet(output: Workbook, source_workbook: Workbook) -> 
 
     for year, organization, project_name in sorted(output_keys):
         indicator_counts = aggregate.setdefault((year, organization, project_name), init_cummu_indicator_counts())
-        for label, _metric, _age_groups in INDICATOR_DEFINITIONS:
-            counts = indicator_counts[label]
-            report.append(
-                [
-                    year,
-                    organization,
-                    project_name,
-                    label,
-                    "",
-                    len(counts["U1 Male"]),
-                    len(counts["U1 Female"]),
-                    len(counts["1-5 Male"]),
-                    len(counts["1-5 Female"]),
-                ]
-            )
+        counts = indicator_counts[CUMMU_INDICATOR_LABEL]
+        report.append(
+            [
+                year,
+                organization,
+                project_name,
+                CUMMU_INDICATOR_LABEL,
+                "",
+                len(counts["U1 Male"]),
+                len(counts["U1 Female"]),
+                len(counts["1-5 Male"]),
+                len(counts["1-5 Female"]),
+            ]
+        )
 
 
 def build_vthc_dose_disaggregate_sheet(output: Workbook, source_workbook: Workbook) -> None:
