@@ -21,6 +21,7 @@ PW_VERIFICATION_SHEET = "pw_verification"
 PW_LONG_FORM_SHEET = "pw_long"
 VTHC_DISAGGREGATE_SHEET = "VTHC_dose_disaggregate"
 INDICATOR_SHEET = "indicators"
+CUMULATIVE_SHEET = "cummulative_sheet"
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
 SOURCE_FIELD_RULES = [
@@ -234,6 +235,19 @@ DISAGGREGATE_HEADERS = [
     "Td At least one dose",
 ]
 DISAGGREGATE_COUNT_COLUMNS = DISAGGREGATE_HEADERS[8:]
+YEARLY_CUMULATIVE_HEADERS = [
+    "Organization",
+    "period",
+    "Project Name",
+    "District (EHO)",
+    "Township_EHO",
+    "Twp_MIMU",
+    "Clinic Name",
+    "ALOD-U1",
+    "ALOD-U5",
+    "ALOD->5",
+    "Td At least one dose",
+]
 INDICATOR_HEADERS = [
     "Year",
     "Organization",
@@ -479,6 +493,15 @@ def init_disaggregate_bucket() -> dict[str, set[str]]:
     return {column: set() for column in DISAGGREGATE_COUNT_COLUMNS}
 
 
+def init_yearly_cumulative_bucket() -> dict[str, set[str]]:
+    return {
+        "ALOD-U1": set(),
+        "ALOD-U5": set(),
+        "ALOD->5": set(),
+        "Td At least one dose": set(),
+    }
+
+
 def parse_year_value(value: object):
     text = normalize_code(value)
     if not text:
@@ -649,6 +672,92 @@ def build_indicator_sheet(output: Workbook, source_workbook: Workbook) -> None:
                 total = u1_male + u1_female + one_to_five_male + one_to_five_female
                 row.extend(["", u1_male, u1_female, one_to_five_male, one_to_five_female, total])
             report.append(row)
+
+
+def build_cummulative_sheet(output: Workbook, source_workbook: Workbook) -> None:
+    if LONG_FORM_SHEET not in output.sheetnames or PW_LONG_FORM_SHEET not in output.sheetnames:
+        return
+
+    child_ws = output[LONG_FORM_SHEET]
+    pw_ws = output[PW_LONG_FORM_SHEET]
+    report = output.create_sheet(title=CUMULATIVE_SHEET)
+    report.append(YEARLY_CUMULATIVE_HEADERS)
+
+    child_headers = [child_ws.cell(1, c).value for c in range(1, child_ws.max_column + 1)]
+    child_idx = {name: child_headers.index(name) + 1 for name in child_headers if isinstance(name, str)}
+
+    pw_headers = [pw_ws.cell(1, c).value for c in range(1, pw_ws.max_column + 1)]
+    pw_idx = {name: pw_headers.index(name) + 1 for name in pw_headers if isinstance(name, str)}
+
+    project_lookup = build_project_lookup(source_workbook)
+    aggregate: dict[tuple[str, int, str, str, str, str, str], dict[str, set[str]]] = {}
+
+    for r in range(2, child_ws.max_row + 1):
+        children_code = normalize_code(child_ws.cell(r, child_idx["children_code"]).value)
+        reporting_month = normalize_date(child_ws.cell(r, child_idx["reporting_month"]).value)
+        source_value = normalize_code(child_ws.cell(r, child_idx["source"]).value)
+        if not children_code or reporting_month is None or source_value != "KDHW":
+            continue
+
+        year = reporting_month.year
+        district = normalize_code(child_ws.cell(r, child_idx["district"]).value)
+        township_eho = normalize_code(child_ws.cell(r, child_idx["township_name"]).value)
+        twp_mimu = normalize_code(child_ws.cell(r, child_idx["township_name_MIMU"]).value)
+        clinic = normalize_code(child_ws.cell(r, child_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        key = ("KDHW", year, project_name, district, township_eho, twp_mimu, clinic)
+        bucket = aggregate.setdefault(key, init_yearly_cumulative_bucket())
+
+        age_months = normalize_age_months(child_ws.cell(r, child_idx["ageInMonths"]).value)
+        alod = age_bucket(age_months)
+        if alod == "U1":
+            bucket["ALOD-U1"].add(children_code)
+        elif alod == "U5":
+            bucket["ALOD-U5"].add(children_code)
+        elif alod == ">5":
+            bucket["ALOD->5"].add(children_code)
+
+    for r in range(2, pw_ws.max_row + 1):
+        mother_code = normalize_code(pw_ws.cell(r, pw_idx["mother_code"]).value)
+        reporting_month = normalize_date(pw_ws.cell(r, pw_idx["reporting_month"]).value)
+        vaccine_dose = normalize_code(pw_ws.cell(r, pw_idx["vaccine_dose"]).value)
+        source_value = normalize_code(pw_ws.cell(r, pw_idx["source"]).value)
+        if not mother_code or reporting_month is None or source_value != "KDHW":
+            continue
+
+        year = reporting_month.year
+        district = normalize_code(pw_ws.cell(r, pw_idx["district"]).value)
+        township_eho = normalize_code(pw_ws.cell(r, pw_idx["township_name"]).value)
+        twp_mimu = normalize_code(pw_ws.cell(r, pw_idx["township_name_MIMU"]).value)
+        clinic = normalize_code(pw_ws.cell(r, pw_idx["vthc_name"]).value)
+        project_name = project_name_for_row(year, clinic, project_lookup)
+        key = ("KDHW", year, project_name, district, township_eho, twp_mimu, clinic)
+        bucket = aggregate.setdefault(key, init_yearly_cumulative_bucket())
+        if vaccine_dose in {"Td1", "Td2"}:
+            bucket["Td At least one dose"].add(mother_code)
+
+    def sort_key(value: tuple[str, int, str, str, str, str, str]):
+        _org, year, _project, district, township, twp_mimu, clinic = value
+        return (year, district, township, twp_mimu, clinic)
+
+    for key in sorted(aggregate.keys(), key=sort_key):
+        org, year, project, district, township, twp_mimu, clinic = key
+        bucket = aggregate[key]
+        report.append(
+            [
+                org,
+                year,
+                project,
+                district,
+                township,
+                twp_mimu,
+                clinic,
+                len(bucket["ALOD-U1"]),
+                len(bucket["ALOD-U5"]),
+                len(bucket["ALOD->5"]),
+                len(bucket["Td At least one dose"]),
+            ]
+        )
 
 
 def build_vthc_dose_disaggregate_sheet(output: Workbook, source_workbook: Workbook) -> None:
@@ -1145,6 +1254,7 @@ def main() -> None:
         pw_summary = build_pw_verification_sheet(report_workbook, pw_sheet)
         build_vthc_dose_disaggregate_sheet(report_workbook, source_workbook)
         build_indicator_sheet(report_workbook, source_workbook)
+        build_cummulative_sheet(report_workbook, source_workbook)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -1191,6 +1301,7 @@ def main() -> None:
     st.write("Long-form sheets include only received doses; rows with source 'Not received yet' are excluded in children_long_form and pw_long.")
     st.write("VTHC_dose_disaggregate is built from children_long_form and pw_long with quarter period aggregation by clinic.")
     st.write("indicators is built from children_long_form with quarterly sex and age disaggregation for Penta1, Penta3, MMR1, MMR2, full dose, and at least one dose under 5.")
+    st.write("cummulative_sheet is built from children_long_form and pw_long with yearly aggregation by clinic for ALOD and Td At least one dose.")
 
 
 if __name__ == "__main__":
