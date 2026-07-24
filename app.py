@@ -345,6 +345,33 @@ def normalize_code(value: object) -> str:
     return str(value).strip()
 
 
+def classify_app_error(exc: Exception, stage: str) -> str:
+    message = normalize_code(str(exc)).casefold()
+    stage_text = normalize_code(stage).casefold()
+
+    if isinstance(exc, MemoryError):
+        return "E3001"
+
+    if isinstance(exc, KeyError):
+        if "sex/gender" in message:
+            return "E1101"
+        if "sheet" in message:
+            return "E1102"
+        if "column" in message:
+            return "E1103"
+        return "E1199"
+
+    if isinstance(exc, ValueError):
+        if "upload a workbook" in message:
+            return "E2101"
+        return "E2199"
+
+    if "download" in stage_text or "workbook_to_bytes" in stage_text:
+        return "E4101"
+
+    return "E9999"
+
+
 def normalize_header_key(value: object) -> str:
     text = normalize_code(value).casefold()
     if not text:
@@ -1531,8 +1558,10 @@ def main() -> None:
         build_td2_indicator_sheet(report_workbook, source_workbook)
     except Exception as exc:
         stage.empty()
-        st.error(f"Failed while {current_stage.lower()}: {exc}")
+        error_code = classify_app_error(exc, current_stage)
+        st.error(f"[{error_code}] Failed while {current_stage.lower()}: {exc}")
         with st.expander("Technical details", expanded=False):
+            st.write(f"Error code: {error_code}")
             st.code(traceback.format_exc())
         return
 
@@ -1565,13 +1594,15 @@ def main() -> None:
         with st.spinner("Preparing the clean verification workbook for download..."):
             report_bytes = workbook_to_bytes(report_workbook)
     except Exception as exc:
-        st.error(
-            f"The workbook was checked successfully, but the download file could not be prepared: {exc}"
-        )
+        error_code = classify_app_error(exc, "Preparing download")
+        st.error(f"[{error_code}] The workbook was checked successfully, but the download file could not be prepared: {exc}")
         st.warning(
             "This usually means the output workbook is too large for the current session memory or the browser/request limit. "
             "If the source file is large, try a smaller input workbook or run the app on a server with higher memory limits."
         )
+        with st.expander("Technical details", expanded=False):
+            st.write(f"Error code: {error_code}")
+            st.code(traceback.format_exc())
         return
 
     st.download_button(
