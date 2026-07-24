@@ -4,6 +4,7 @@ from collections import Counter
 from io import BytesIO
 from datetime import date, datetime
 import re
+import traceback
 
 import streamlit as st
 from openpyxl import Workbook, load_workbook
@@ -11,6 +12,7 @@ from openpyxl.styles import Font, PatternFill
 
 
 APP_TITLE = "KDHW Children Verification"
+MAX_UPLOAD_SIZE_MB = 200
 SOURCE_SHEET = "children"
 PW_SHEET = "PW"
 CODE_HEADER = "children_code"
@@ -1483,19 +1485,44 @@ def main() -> None:
         "Upload a KDHW workbook or use the bundled sample file. The app checks the children sheet, "
         "flags missing or duplicate children_code values, and generates a verification workbook with red highlights."
     )
+    st.caption(
+        f"Upload limit: {MAX_UPLOAD_SIZE_MB} MB per file. If an upload still fails before the app runs, "
+        "the Streamlit hosting layer or reverse proxy is rejecting the request, not the workbook parser."
+    )
 
-    uploaded_file = st.file_uploader("Upload an .xlsx workbook", type=["xlsx"])
+    uploaded_file = st.file_uploader(
+        "Upload an .xlsx workbook",
+        type=["xlsx"],
+        max_upload_size=MAX_UPLOAD_SIZE_MB,
+    )
 
     if uploaded_file is None:
         st.info("Upload a workbook to generate the verification file.")
         return
 
+    stage = st.empty()
+    current_stage = "starting"
+
+    def set_stage(message: str) -> None:
+        nonlocal current_stage
+        current_stage = message
+        stage.info(message)
+
+    uploaded_size_mb = getattr(uploaded_file, "size", None)
+    if uploaded_size_mb is not None:
+        st.caption(f"Uploaded file size: {uploaded_size_mb / (1024 * 1024):.2f} MB")
+
     try:
+        set_stage("Loading workbook...")
         source_workbook, source_path = load_source_workbook(uploaded_file)
+        set_stage("Checking children and PW sheets...")
         source_sheet = get_children_sheet(source_workbook)
         pw_sheet = get_pw_sheet(source_workbook)
+        set_stage("Building verification sheets...")
         report_workbook, summary = build_verification_report(source_sheet)
+        set_stage("Building PW verification sheet...")
         pw_summary = build_pw_verification_sheet(report_workbook, pw_sheet)
+        set_stage("Building disaggregate and indicator sheets...")
         build_vthc_dose_disaggregate_sheet(report_workbook, source_workbook)
         build_indicator_sheet(report_workbook, source_workbook)
         build_cummulative_sheet(report_workbook, source_workbook)
@@ -1503,9 +1530,13 @@ def main() -> None:
         build_td_alod_sheet(report_workbook, source_workbook)
         build_td2_indicator_sheet(report_workbook, source_workbook)
     except Exception as exc:
-        st.error(str(exc))
+        stage.empty()
+        st.error(f"Failed while {current_stage.lower()}: {exc}")
+        with st.expander("Technical details", expanded=False):
+            st.code(traceback.format_exc())
         return
 
+    stage.success("Workbook checks finished. Preparing the download file...")
     st.caption(f"Using uploaded workbook: {source_path}")
 
     col1, col2, col3, col4 = st.columns(4)
@@ -1530,7 +1561,19 @@ def main() -> None:
     st.metric("PW rows with unlogical Td records", pw_summary["unlogical_rows"])
     st.info(f"PW rows with issues: {pw_summary['affected_rows']}")
 
-    report_bytes = workbook_to_bytes(report_workbook)
+    try:
+        with st.spinner("Preparing the clean verification workbook for download..."):
+            report_bytes = workbook_to_bytes(report_workbook)
+    except Exception as exc:
+        st.error(
+            f"The workbook was checked successfully, but the download file could not be prepared: {exc}"
+        )
+        st.warning(
+            "This usually means the output workbook is too large for the current session memory or the browser/request limit. "
+            "If the source file is large, try a smaller input workbook or run the app on a server with higher memory limits."
+        )
+        return
+
     st.download_button(
         label="Download new verification file",
         data=report_bytes,
