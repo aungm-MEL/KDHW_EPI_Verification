@@ -1156,7 +1156,7 @@ def build_output_columns(headers: list[object]) -> tuple[list[int], list[str], d
 def load_source_workbook(uploaded_file):
     if uploaded_file is None:
         raise ValueError("Please upload a workbook to verify.")
-    return load_workbook(uploaded_file), uploaded_file.name
+    return load_workbook(uploaded_file, read_only=True, data_only=True, keep_links=False), uploaded_file.name
 
 
 def get_children_sheet(workbook: Workbook):
